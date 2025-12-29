@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+/* Настройка темы прямо в CSS (новый стандарт v4) */
+@theme {
+  --color-background: #050505;
+  --color-foreground: #ededed;
+}
+
+/* Стили для редактора в стиле Final Draft */
+
+/* Стили для SCRIPT режима */
+.prose-script h1 { 
+  text-transform: uppercase; 
+  font-weight: bold; 
+  margin-top: 2rem; 
+} /* Slugline */
+
+.prose-script h2 { 
+  text-align: center; 
+  text-transform: uppercase; 
+  width: 100%; 
+  margin-top: 1.5rem; 
+  margin-bottom: 0;
+} /* Character */
+
+.prose-script blockquote { 
+  border-left: none; 
+  text-align: center; 
+  margin: 0 auto; 
+  width: 70%; 
+  font-style: normal; 
+  color: white;
+} /* Dialogue */
+
+.ProseMirror {
+  outline: none !important;
+  font-family: 'Courier Prime', 'Courier New', Courier, monospace;
+  line-height: 1.2;
+}
+
+.prose-book p {
+  margin-bottom: 0;
+  text-indent: 1.5em; /* Та самая красная строка */
+}
+
+.prose-book p:first-of-type {
+  text-indent: 0; /* Первый абзац без отступа — стандарт верстки */
+}
+
+/* Режим Сценария (Final Draft Style) */
+.prose-script {
+  font-family: 'Courier Prime', monospace;
+}
+
+/* Элементы сценария (заглушки под классы, которые мы будем использовать) */
+.ProseMirror p { margin-bottom: 1rem; }
+
+/* Мы будем использовать специальные стили для элементов сценария */
+.ProseMirror .character { text-align: center; margin-top: 1.5rem; text-transform: uppercase; width: 50%; margin-left: 25%; }
+.ProseMirror .dialogue { text-align: center; width: 70%; margin-left: 15%; margin-bottom: 1rem; }
+.ProseMirror .parenthetical { text-align: center; width: 40%; margin-left: 30%; font-size: 0.9em; }
+.ProseMirror .scene-heading { text-transform: uppercase; font-weight: bold; margin-top: 2rem; }
+
+@layer base {
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}
+
+/* Стили для скроллбара */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #1f2937;
+  border-radius: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #3b82f6;
+}
