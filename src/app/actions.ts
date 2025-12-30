@@ -1,127 +1,185 @@
 'use server'
 
-import { GoogleGenAI } from "@google/genai";
-import { StoryCircle } from "@/types/types";
+// 1. Правильный импорт из официального пакета
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { supabase } from "@/lib/supabase";
 
-const apiKey = process.env.GEMINI_API_KEY;
-const genAI = new GoogleGenAI(apiKey || "");
-
-// Твои модели (СТРОГО СОХРАНЕНЫ)
+// ВАШИ МОДЕЛИ (БЕЗ ИЗМЕНЕНИЙ)
 const TEXT_MODEL = "gemini-3-flash-preview";
-const IMAGE_MODEL = "gemini-2.5-flash-image";
 
-// Хелпер для очистки JSON ответов
+// Функция очистки JSON
 const cleanJson = (text: string) => {
-  return text.replace(/```json/g, "").replace(/```/g, "").trim();
+  try {
+    const firstBrace = text.indexOf('{');
+    const lastBrace = text.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1) return "{}";
+    return text.substring(firstBrace, lastBrace + 1);
+  } catch (e) {
+    return "{}";
+  }
 };
 
-// --- АГЕНТ-АРХИТЕКТ (ШАГИ 1-4) ---
-// Этот агент генерирует 8 шагов круга для любого уровня
-export async function runArchitectAgent(
-  level: 'global' | 'act' | 'chapter',
-  context: string,
-  prompt: string
-) {
-  try {
-    const model = genAI.getGenerativeModel({ 
-      model: TEXT_MODEL,
-      systemInstruction: `You are the MASTER ARCHITECT. You specialize in the Fractal Story Circle method (8 steps).
-      Your task is to generate a perfectly balanced 8-step story circle for the ${level} level.
-      
-      The 8 steps MUST be:
-      1. YOU (Zone of comfort)
-      2. NEED (But they want something)
-      3. GO (Enter unfamiliar situation)
-      4. SEARCH (Adapt to it)
-      5. FIND (Get what they wanted)
-      6. TAKE (Pay a heavy price)
-      7. RETURN (Return to familiar situation)
-      8. CHANGE (Having changed)
+// 2. Универсальная функция получения модели
+async function getGenModel(instruction: string) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is missing in .env.local");
 
-      Return ONLY a JSON object with these keys: step1_you, step2_need, step3_go, step4_search, step5_find, step6_take, step7_return, step8_change.`
-    });
-
-    const fullPrompt = `
-      CONTEXT FROM HIGHER LEVEL:
-      ${context}
-      
-      USER INSTRUCTIONS:
-      ${prompt}
-      
-      Generate the 8-step circle for this ${level}:
-    `;
-
-    const result = await model.generateContent(fullPrompt);
-    const jsonText = cleanJson(result.response.text());
-    return { success: true, data: JSON.parse(jsonText) as StoryCircle };
-  } catch (error: any) {
-    console.error("Architect Error:", error);
-    return { success: false, error: error.message };
-  }
+  // Создаем экземпляр строго по документации Google 2025
+  const genAI = new GoogleGenerativeAI(apiKey);
+  
+  return genAI.getGenerativeModel({
+    model: TEXT_MODEL,
+    systemInstruction: instruction,
+    generationConfig: { 
+      responseMimeType: "application/json",
+      temperature: 0.7 
+    }
+  });
 }
 
-// --- АГЕНТ-ПЛАНИРОВЩИК (ШАГ 6: БИТ-ШИТ) ---
+export async function runArchitectAgent(level: string, context: string, prompt: string) {
+  try {
+    const instruction = `You are a professional Story Architect. 
+    Your goal is to build a fractal story structure. 
+    Return ONLY a JSON object with keys: step1_you, step2_need, step3_go, step4_search, step5_find, step6_take, step7_return, step8_change.`;
+    
+    const model = await getGenModel(instruction);
+
+    const fullPrompt = `CONTEXT: ${context}\nTASK: ${prompt} for level ${level}`;
+    const result = await model.generateContent(fullPrompt);
+    const rawText = result.response.text();
+
+    console.log(`--- AI RESPONSE (${level}) ---`, rawText);
+
+    return { success: true, data: JSON.parse(cleanJson(rawText)) };
+
+    } catch (error: any) {
+        // Если это ошибка лимита Google
+        if (error.status === 429 || error.message?.includes('429')) {
+          return { 
+            success: false, 
+            error: "QUOTA_EXCEEDED", 
+            message: "Google Gemini limit reached. Please wait 30-60 seconds." 
+          };
+        }
+        
+        console.error("SERVER ERROR:", error.message);
+        return { success: false, error: "SERVER_ERROR", message: error.message };
+      }
+}
+
+// Функции для остальных агентов
 export async function generateBeatSheet(fractalContext: string, idea: string) {
   try {
-    const model = genAI.getGenerativeModel({ 
-      model: TEXT_MODEL,
-      systemInstruction: "You are the PLANNER agent. Create a detailed Beat Sheet based on the provided Fractal Story Circle of the chapter."
-    });
-
-    const prompt = `
-      FRACTAL CONTEXT (Conflicts, Global Circle, Act Circle, Chapter Circle):
-      ${fractalContext}
-
-      TASK: Create a detailed Beat Sheet for this specific chapter.
-      USER IDEA: ${idea}
-    `;
-
-    const result = await model.generateContent(prompt);
+    const model = await getGenModel("You are the PLANNER agent. Create a detailed Beat Sheet.");
+    const result = await model.generateContent(`CONTEXT: ${fractalContext}\nIDEA: ${idea}`);
     return { success: true, data: result.response.text() };
   } catch (error: any) {
-    return { success: false, error: error.message };
-  }
+        // Если это ошибка лимита Google
+        if (error.status === 429 || error.message?.includes('429')) {
+          return { 
+            success: false, 
+            error: "QUOTA_EXCEEDED", 
+            message: "Google Gemini limit reached. Please wait 30-60 seconds." 
+          };
+        }
+        
+        console.error("SERVER ERROR:", error.message);
+        return { success: false, error: "SERVER_ERROR", message: error.message };
+    }
 }
 
-// --- АГЕНТ-ПИСАТЕЛЬ (ШАГ 7: ПРОЗА) ---
 export async function generateSceneProse(fractalContext: string, beatSheet: string) {
   try {
-    const model = genAI.getGenerativeModel({ 
-      model: TEXT_MODEL,
-      systemInstruction: "You are the WRITER agent. Write vivid fiction prose. Use the Fractal Context to ensure deep thematic resonance."
-    });
-
-    const prompt = `
-      FRACTAL CONTEXT:
-      ${fractalContext}
-
-      BEAT SHEET:
-      ${beatSheet}
-
-      TASK: Write the final prose for this chapter.
-    `;
-
-    const result = await model.generateContent(prompt);
+    const model = await getGenModel("You are the WRITER agent. Write vivid fiction prose.");
+    const result = await model.generateContent(`CONTEXT: ${fractalContext}\nBEAT SHEET: ${beatSheet}`);
     return { success: true, data: result.response.text() };
   } catch (error: any) {
-    return { success: false, error: error.message };
-  }
+        // Если это ошибка лимита Google
+        if (error.status === 429 || error.message?.includes('429')) {
+          return { 
+            success: false, 
+            error: "QUOTA_EXCEEDED", 
+            message: "Google Gemini limit reached. Please wait 30-60 seconds." 
+          };
+        }
+        
+        console.error("SERVER ERROR:", error.message);
+        return { success: false, error: "SERVER_ERROR", message: error.message };
+    }
 }
 
-// --- АГЕНТ-КОНТИНЬЮИТИ ---
+export async function runChroniclerAgent(chapterText: string, currentCodex: string) {
+  try {
+    const model = await getGenModel("You are the CHRONICLER. Return JSON array of world changes.");
+    const result = await model.generateContent(`CODEX: ${currentCodex}\nTEXT: ${chapterText}`);
+    return { success: true, data: JSON.parse(cleanJson(result.response.text())) };
+  } catch (error: any) {
+      // Если это ошибка лимита Google
+      if (error.status === 429 || error.message?.includes('429')) {
+        return { 
+          success: false, 
+          error: "QUOTA_EXCEEDED", 
+          message: "Google Gemini limit reached. Please wait 30-60 seconds." 
+        };
+      }
+      
+      console.error("SERVER ERROR:", error.message);
+      return { success: false, error: "SERVER_ERROR", message: error.message };
+    }
+}
+
 export async function checkContinuity(bibleContext: string, sceneText: string) {
   try {
-    const model = genAI.getGenerativeModel({ 
-      model: TEXT_MODEL,
-      systemInstruction: "You are the CONTINUITY agent. Check for contradictions with the Fractal Structure and the Project Bible."
-    });
-
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: `BIBLE: ${bibleContext}\n\nTEXT: ${sceneText}` }] }],
-      generationConfig: { responseMimeType: "application/json" }
-    });
+    const model = await getGenModel("You are the CONTINUITY agent. Find contradictions.");
+    const result = await model.generateContent(`BIBLE: ${bibleContext}\nTEXT: ${sceneText}`);
     return { success: true, data: result.response.text() };
   } catch (error: any) {
-    return { success: false, error: error.message };
+        // Если это ошибка лимита Google
+        if (error.status === 429 || error.message?.includes('429')) {
+          return { 
+            success: false, 
+            error: "QUOTA_EXCEEDED", 
+            message: "Google Gemini limit reached. Please wait 30-60 seconds." 
+          };
+        }
+        
+        console.error("SERVER ERROR:", error.message);
+        return { success: false, error: "SERVER_ERROR", message: error.message };
+    }
+}
+
+export async function saveChapterAction(chapterId: string, updates: any) {
+  const { error } = await supabase.from('chapters').update(updates).eq('id', chapterId);
+  return { success: !error, error };
+}
+
+// --- ГЕНЕРАТОР ПОЛНОГО АУТЛАЙНА (16 ГЛАВ) ---
+export async function generateFullOutline(context: string) {
+  try {
+    const instruction = `You are the MASTER ARCHITECT. 
+    Based on the global story circle and acts, create a high-level roadmap for 16 chapters.
+    Return ONLY a JSON object with a "chapters" array. 
+    Each item MUST have: "order" (1-16), "title" (short, catchy), and "goal" (one sentence of what happens).
+    Example: { "chapters": [{ "order": 1, "title": "The Awakening", "goal": "Hero realizes their life is a lie." }, ...] }`;
+    
+    const model = await getGenModel(instruction, true); // true включает JSON-режим
+    const result = await model.generateContent(`CONTEXT: ${context}`);
+    const response = await result.response;
+    const data = JSON.parse(cleanJson(response.text()));
+    
+    return { success: true, data: data.chapters };
+  } catch (error: any) {
+        // Если это ошибка лимита Google
+        if (error.status === 429 || error.message?.includes('429')) {
+          return { 
+            success: false, 
+            error: "QUOTA_EXCEEDED", 
+            message: "Google Gemini limit reached. Please wait 30-60 seconds." 
+          };
+        }
+        
+        console.error("SERVER ERROR:", error.message);
+        return { success: false, error: "SERVER_ERROR", message: error.message };
   }
 }

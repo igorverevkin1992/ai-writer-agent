@@ -10,6 +10,8 @@ interface AgentSidebarProps {
   onAction: (type: AgentType, input?: string) => void;
   plan: string;
   setPlan: (plan: string) => void;
+  suggestions?: any[];
+  onApplySuggestion?: (s: any) => void;
 }
 
 export const AgentSidebar: React.FC<AgentSidebarProps> = ({ 
@@ -17,7 +19,9 @@ export const AgentSidebar: React.FC<AgentSidebarProps> = ({
   continuityErrors, 
   onAction,
   plan,
-  setPlan
+  setPlan,
+  suggestions,       // <-- Добавить сюда
+  onApplySuggestion  // <-- Добавить сюда
 }) => {
   const [activeTab, setActiveTab] = useState<AgentType>('planner');
   const [plannerInput, setPlannerInput] = useState('');
@@ -115,18 +119,48 @@ export const AgentSidebar: React.FC<AgentSidebarProps> = ({
 
         {/* WRITER */}
         {activeTab === 'writer' && (
-          <div className="space-y-4">
+          <div className="space-y-4 animate-in fade-in duration-500">
             <label className="block text-[10px] font-black text-gray-500 uppercase mb-3 tracking-widest">Active Beat Sheet</label>
             <div className={readOnlyStyle}>
               {plan || <span className="text-gray-600 italic">No plan detected. Use Planner first.</span>}
             </div>
+            
             <button
               onClick={() => onAction('writer')}
               disabled={status.isWorking || !plan}
-              className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl transition-all disabled:opacity-50 flex items-center justify-center gap-2 uppercase text-xs tracking-widest"
+              className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl transition-all disabled:opacity-50 flex items-center justify-center gap-2 uppercase text-xs tracking-widest shadow-lg shadow-indigo-900/20"
             >
               {status.isWorking ? <Loader2 className="animate-spin" size={16} /> : 'Write Scene Draft'}
             </button>
+
+            {/* --- БЛОК ХРОНИСТА (CHRONICLE SUGGESTIONS) --- */}
+            {suggestions && suggestions.length > 0 && (
+              <div className="mt-8 pt-8 border-t border-gray-800 space-y-4 animate-in slide-in-from-bottom-4 duration-700">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="text-amber-500" size={14} />
+                  <h4 className="text-[10px] font-black text-amber-500 uppercase tracking-[0.2em]">Chronicle Updates</h4>
+                </div>
+                
+                <div className="space-y-3">
+                  {suggestions.map((s, i) => (
+                    <div key={i} className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-2xl group hover:border-amber-500/40 transition-all">
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="text-[9px] font-black px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 uppercase tracking-tighter">
+                          {s.action}: {s.name}
+                        </span>
+                        <button 
+                          onClick={() => onApplySuggestion?.(s)}
+                          className="text-[9px] font-black bg-amber-600 hover:bg-amber-500 text-white px-3 py-1 rounded-lg shadow-lg shadow-amber-900/40 transition-all active:scale-95"
+                        >
+                          APPLY
+                        </button>
+                      </div>
+                      <p className="text-xs text-gray-400 leading-relaxed italic">"{s.suggestion}"</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

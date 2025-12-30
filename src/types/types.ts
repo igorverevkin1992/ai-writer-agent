@@ -51,6 +51,39 @@ export interface Bible {
   locations: Location[];      // Справочник локаций
 }
 
+// Обнови или добавь эти интерфейсы в types.ts
+
+export interface Chapter {
+  id: string; // Теперь это UUID из базы
+  project_id: string;
+  order_index: number;
+  title: string;
+  circle: StoryCircle;
+  beatSheet: string;
+  content: string;
+  last_modified?: string;
+}
+
+export interface CodexItem {
+  id: string;
+  project_id: string;
+  type: 'character' | 'location';
+  name: string;
+  description: string;
+  metadata: any; 
+}
+
+// Теперь Библия — это агрегатор данных, который мы собираем при загрузке
+export interface Bible {
+  summary: string;
+  conflicts: CoreConflicts;
+  characterArc: string;
+  globalCircle: StoryCircle;
+  chapters: Chapter[]; // Список глав
+  characters: CodexItem[];
+  locations: CodexItem[];
+}
+
 // --- ДОПОЛНИТЕЛЬНЫЕ ТИПЫ ДЛЯ UI ---
 
 export interface Character {
