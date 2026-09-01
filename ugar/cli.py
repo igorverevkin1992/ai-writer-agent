@@ -225,11 +225,15 @@ def cmd_review(chapter: int) -> None:
     st = ChapterState(ws, chapter)
     st.require("верифицировано-2")
     path = review_mod.build_review_pack(ws, chapter, st.draft)
+    from . import htmlreview
+
+    html_path = htmlreview.build_review_html(ws, chapter, st.draft)
     st.transition("на-приёмке", "review")
     typer.secho(f"Пакет приёмки: {path}", fg=typer.colors.GREEN)
+    typer.secho(f"Чтение с флагами (браузер): {html_path}", fg=typer.colors.GREEN)
     typer.echo(
-        "Дальше: правки — в edits.md; решения по самоволкам — в resolutions.json "
-        "(«вычеркнуть»|«канонизировать»); затем `ugar apply-edits N`."
+        f"Дальше: правки — в edits.md (`ugar edits {chapter}` — предпросмотр); "
+        f"решения по самоволкам — `ugar resolve {chapter}`; затем `ugar apply-edits {chapter}`."
     )
 
 
@@ -433,11 +437,19 @@ def cmd_status(
 
 def _status_detail(ws: Workspace, chapter: int) -> None:
     """Карточка главы: метрики вердикта, флаги, самоволки, следующий шаг."""
+    from . import timing
+
     st = ChapterState(ws, chapter)
     typer.secho(f"Глава {chapter} · состояние «{st.state}» · черновик {st.draft}", bold=True)
     typer.echo(
         f"Авто-повторов Э1: {st.data.get('авто_повторов', 0)}; итераций правок: {st.data.get('итераций_правок', 0)}"
     )
+    machine_s, author_s = timing.chapter_times(st.data.get("история", []))
+    if machine_s or author_s:
+        over = " ⚠ цель ≤40 мин" if author_s > 40 * 60 else ""
+        typer.echo(
+            f"Время такта: автора {timing.fmt_minutes(author_s)}{over} · машинное {timing.fmt_minutes(machine_s)}"
+        )
     verdict_path = ws.chapter_dir(chapter) / "verdict.json"
     if verdict_path.exists():
         from .schemas import Verdict
@@ -625,6 +637,36 @@ def cmd_log(n: int = typer.Option(15, "-n", help="Сколько последн�
         )
     if total_cost:
         typer.echo(f"Стоимость показанных вызовов: ${total_cost:.4f}")
+
+
+@app.command("find", rich_help_panel="Обзор")
+@_friendly
+def cmd_find(query: str) -> None:
+    """Поиск по канону и выгрузкам: факты, закладки, правила, брифы, досье, проза."""
+    from . import search
+
+    ws, cfg, lib = _ctx()
+    groups = search.grouped(search.find(ws.exports, lib, query))
+    if not groups:
+        typer.echo(f"«{query}»: ничего не найдено.")
+        return
+    for kind, hits in groups.items():
+        typer.secho(f"{kind} ({len(hits)}):", bold=True)
+        for h in hits:
+            typer.echo(f"  [{h.ref}] {h.text}")
+
+
+@app.command("snapshot", rich_help_panel="Канон и бэкап")
+@_friendly
+def cmd_snapshot(volume: int = typer.Argument(1, help="Номер тома.")) -> None:
+    """Черновик снапшота тома (реестр 3.5): кто что знает, закладки, хронология."""
+    from . import snapshot as snapshot_mod
+
+    ws, cfg, lib = _ctx()
+    exporter.run_export(lib, ws.exports, ws.logs)
+    path = snapshot_mod.build_snapshot(ws, volume)
+    typer.secho(f"Срез тома {volume}: {path}", fg=typer.colors.GREEN)
+    typer.echo("Внесите его в библиотеку правкой канона и `ugar canon-commit` (FR-K3 соблюдён).")
 
 
 @app.command("doctor", rich_help_panel="Обзор")

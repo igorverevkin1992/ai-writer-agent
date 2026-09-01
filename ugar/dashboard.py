@@ -1,20 +1,22 @@
-"""Дашборд (FR-D1): статический HTML + plotly.js.
+"""Дашборд (FR-D1): самодостаточный HTML c инлайн-SVG — работает без сети (§1.3).
 
-Графики: правки/1000 слов по главам; метрики Э1 с коридорами и флагом
-отклонения >20% от среднего части; TTR нарастающим окном; расход токенов
-и стоимость по ролям.
+Графики: правки/1000 слов по главам; метрики Э1 с коридорами норм и флагом
+отклонения >20% от среднего части; TTR нарастающим окном; расход токенов и
+стоимость по ролям. Плюс: таблица глав с состояниями FSM и временем автора
+(критерий приёмки 1: такт ≤40 минут работы автора).
 """
 
 from __future__ import annotations
 
+import html
 import json
 from pathlib import Path
 
-from . import exporter, guard, textutils
+from . import exporter, guard, textutils, timing
 from .apilog import read_log
+from .fsm import all_states
 from .paths import Workspace
-
-PLOTLY_CDN = "https://cdn.plot.ly/plotly-2.35.2.min.js"
+from .svgchart import Threshold, bar_chart, data_table, line_chart
 
 METRIC_KEYS = [
     ("V1.2a_средняя_длина", "Средняя длина фразы", "средняя_длина"),
@@ -23,6 +25,36 @@ METRIC_KEYS = [
     ("V1.3_был", "«был» на 250 слов", "был_на_250"),
     ("V1.4_усилители", "Усилители на 1000 слов", "усилители_на_1000"),
 ]
+
+CSS = """
+:root { color-scheme: light dark; }
+body { margin: 0; font-family: system-ui, sans-serif; background: var(--surface-1); color: var(--text-primary); }
+.viz-root {
+  --surface-1: #fcfcfb; --text-primary: #0b0b0b; --text-secondary: #52514e;
+  --grid: #e3e2dd; --series-1: #2a78d6; --critical: #d03b3b; --good: #0ca30c;
+  max-width: 960px; margin: 0 auto; padding: 24px 20px 80px;
+}
+@media (prefers-color-scheme: dark) {
+  .viz-root { --surface-1: #1a1a19; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+              --grid: #3a3a38; --series-1: #3987e5; }
+}
+h1 { font-size: 1.35rem; } h2 { font-size: 1.05rem; margin: 2rem 0 0.4rem; }
+.meta, .tick, .thr-lbl { fill: var(--text-secondary); color: var(--text-secondary); font-size: 11px; }
+svg { width: 100%; height: auto; display: block; }
+.grid { stroke: var(--grid); stroke-width: 1; }
+.series { fill: none; stroke: var(--series-1); stroke-width: 2; }
+.marker { fill: var(--series-1); }
+.marker-out { fill: var(--critical); }
+.bar { fill: var(--series-1); }
+.thr { stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 4 3; }
+.thr-critical { stroke: var(--critical); stroke-width: 1; stroke-dasharray: 4 3; }
+.lbl { fill: var(--text-primary); font-size: 11px; font-weight: 600; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; margin-top: 0.4rem; }
+th, td { border: 1px solid var(--grid); padding: 5px 9px; text-align: left; }
+details { margin: 0.3rem 0 1rem; color: var(--text-secondary); }
+.ok { color: var(--good); } .over { color: var(--critical); font-weight: 600; }
+.empty { color: var(--text-secondary); }
+"""
 
 
 def _read_metrics(ws: Workspace) -> list[dict]:
@@ -36,6 +68,30 @@ def _read_metrics(ws: Workspace) -> list[dict]:
     return [latest[k] for k in sorted(latest)]
 
 
+def _figure(title: str, svg: str, table: str = "") -> str:
+    return f"<h2>{html.escape(title)}</h2>{svg}{table}"
+
+
+def _chapters_block(ws: Workspace) -> str:
+    states = all_states(ws)
+    if not states:
+        return ""
+    rows = []
+    for st in states:
+        machine_s, author_s = timing.chapter_times(st.data.get("история", []))
+        over = author_s > 40 * 60
+        rows.append(
+            f"<tr><td>{st.chapter}</td><td>{html.escape(st.state)}</td>"
+            f"<td>{timing.fmt_minutes(machine_s)}</td>"
+            f"<td class='{'over' if over else 'ok'}'>{timing.fmt_minutes(author_s)}</td></tr>"
+        )
+    return (
+        "<h2>Главы: состояние и время такта</h2>"
+        "<table><tr><th>Глава</th><th>Состояние</th><th>Машинное время</th>"
+        "<th>Время автора (цель ≤40 мин)</th></tr>" + "".join(rows) + "</table>"
+    )
+
+
 def build_dashboard(ws: Workspace) -> Path:
     metrics = _read_metrics(ws)
     chapters = [m["chapter"] for m in metrics]
@@ -43,44 +99,42 @@ def build_dashboard(ws: Workspace) -> Path:
         norms = exporter.load_norms(ws.exports)
     except FileNotFoundError:
         norms = {}
-
-    figures: list[dict] = []
+    figures: list[str] = [_chapters_block(ws)]
 
     # правки/1000 слов
+    values = [m.get("правок_на_1000") or 0 for m in metrics]
     figures.append(
-        {
-            "title": "Правки автора на 1000 слов",
-            "data": [{"x": chapters, "y": [m.get("правок_на_1000") for m in metrics], "type": "bar", "name": "правок/1000"}],
-            "layout": {"xaxis": {"title": "Глава"}},
-        }
+        _figure(
+            "Правки автора на 1000 слов",
+            bar_chart([str(c) for c in chapters], values, tooltip="глава {x}: {y} правок/1000"),
+            data_table(["Глава", "Правок/1000"], list(zip(chapters, values))),
+        )
     )
 
-    # метрики Э1 с коридорами и флагом отклонения >20% от среднего части
+    # метрики Э1 с коридорами и выбросами >20% от среднего части
     for key, title, norm_id in METRIC_KEYS:
-        values = [m.get(key) for m in metrics]
-        known = [v for v in values if v is not None]
-        mean = sum(known) / len(known) if known else None
-        shapes = []
+        pairs = [(c, m.get(key)) for c, m in zip(chapters, metrics) if m.get(key) is not None]
+        if not pairs:
+            continue
+        xs = [float(c) for c, _ in pairs]
+        ys = [float(v) for _, v in pairs]
+        mean = sum(ys) / len(ys)
+        outliers = {i for i, v in enumerate(ys) if mean and abs(v - mean) / mean > 0.20}
+        thresholds = []
         norm = norms.get(norm_id)
-        if norm is not None:
-            for bound, val in (("мин", norm.min), ("макс", norm.max)):
-                if val is not None:
-                    shapes.append(
-                        {"type": "line", "x0": 0, "x1": 1, "xref": "paper", "y0": val, "y1": val,
-                         "line": {"dash": "dash", "color": "#888"}}
-                    )
-        outliers = [
-            {"x": [c], "y": [v], "mode": "markers", "marker": {"size": 12, "color": "red"},
-             "name": "отклонение >20% от среднего части", "showlegend": False}
-            for c, v in zip(chapters, values)
-            if v is not None and mean and abs(v - mean) / mean > 0.20
-        ]
+        if norm:
+            if norm.min is not None:
+                thresholds.append(Threshold(norm.min, f"мин {norm.min:g}"))
+            if norm.max is not None:
+                thresholds.append(Threshold(norm.max, f"макс {norm.max:g}"))
+            if norm.brak is not None:
+                thresholds.append(Threshold(norm.brak, f"брак {norm.brak:g}", "critical"))
         figures.append(
-            {
-                "title": title,
-                "data": [{"x": chapters, "y": values, "type": "scatter", "mode": "lines+markers", "name": title}, *outliers],
-                "layout": {"xaxis": {"title": "Глава"}, "shapes": shapes},
-            }
+            _figure(
+                title,
+                line_chart(xs, ys, thresholds=thresholds, outliers=outliers, tooltip="глава {x}: {y}"),
+                data_table(["Глава", title], pairs),
+            )
         )
 
     # TTR нарастающим окном по корпусу части
@@ -88,65 +142,52 @@ def build_dashboard(ws: Workspace) -> Path:
     if ws.corpus.exists():
         for f in sorted(ws.corpus.glob("*.txt")):
             part_tokens.extend(f.read_text(encoding="utf-8").split())
-    win = int(norms["ttr_окно_слов"].max) if "ttr_окно_слов" in norms else 10_000
+    win = int(norms["ttr_окно_слов"].max) if "ttr_окно_слов" in norms and norms["ttr_окно_слов"].max else 10_000
     rolling = textutils.rolling_ttr(part_tokens, win)
-    ttr_shapes = []
+    ttr_thr = []
     if "ttr_мин" in norms and norms["ttr_мин"].min is not None:
-        ttr_shapes.append(
-            {"type": "line", "x0": 0, "x1": 1, "xref": "paper",
-             "y0": norms["ttr_мин"].min, "y1": norms["ttr_мин"].min, "line": {"dash": "dash", "color": "red"}}
-        )
+        ttr_thr.append(Threshold(norms["ttr_мин"].min, f"мин {norms['ttr_мин'].min:g}", "critical"))
     figures.append(
-        {
-            "title": f"TTR нарастающим окном {win} слов (по части)",
-            "data": [{"x": [p for p, _ in rolling], "y": [v for _, v in rolling], "type": "scatter", "name": "TTR"}],
-            "layout": {"xaxis": {"title": "Позиция (слов)"}, "shapes": ttr_shapes},
-        }
+        _figure(
+            f"TTR нарастающим окном {win} слов (по части)",
+            line_chart(
+                [float(p) for p, _ in rolling], [v for _, v in rolling],
+                thresholds=ttr_thr, x_label="позиция, слов", tooltip="слово {x}: TTR {y}",
+            ),
+            data_table(["Позиция", "TTR"], [(p, f"{v:.3f}") for p, v in rolling]),
+        )
     )
 
-    # расход токенов и стоимость по ролям
+    # токены и стоимость по ролям
     api_rows = read_log(ws.logs)
     roles = sorted({r.get("role") for r in api_rows if r.get("role")})
-    tokens_by_role = [
+    tokens = [
         sum((r.get("tokens_in") or 0) + (r.get("tokens_out") or 0) for r in api_rows if r.get("role") == role)
         for role in roles
     ]
-    cost_by_role = [
-        round(sum(r.get("cost_est") or 0 for r in api_rows if r.get("role") == role), 4) for role in roles
-    ]
+    costs = [round(sum(r.get("cost_est") or 0 for r in api_rows if r.get("role") == role), 4) for role in roles]
     figures.append(
-        {
-            "title": "Токены по ролям",
-            "data": [{"x": roles, "y": tokens_by_role, "type": "bar", "name": "токены"}],
-            "layout": {},
-        }
+        _figure(
+            "Токены по ролям",
+            bar_chart(roles, [float(t) for t in tokens], tooltip="{x}: {y} токенов"),
+            data_table(["Роль", "Токены", "Стоимость, $"], list(zip(roles, tokens, costs))),
+        )
     )
-    figures.append(
-        {
-            "title": "Оценка стоимости по ролям",
-            "data": [{"x": roles, "y": cost_by_role, "type": "bar", "name": "стоимость"}],
-            "layout": {},
-        }
-    )
+    if any(costs):
+        figures.append(
+            _figure("Оценка стоимости по ролям, $", bar_chart(roles, costs, tooltip="{x}: ${y}"))
+        )
 
-    divs = []
-    scripts = []
-    for i, fig in enumerate(figures):
-        divs.append(f'<h2>{fig["title"]}</h2><div id="fig{i}" style="height:360px"></div>')
-        layout = {"margin": {"t": 20}, **fig["layout"]}
-        scripts.append(f'Plotly.newPlot("fig{i}", {json.dumps(fig["data"], ensure_ascii=False)}, {json.dumps(layout, ensure_ascii=False)});')
-
-    html = f"""<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>КОНВЕЙЕР УГАР · Дашборд</title>
-<script src="{PLOTLY_CDN}"></script>
-<style>body{{font-family:system-ui,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem}}h2{{margin-top:2rem}}</style>
-</head><body>
+    page = f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>КОНВЕЙЕР УГАР · Дашборд</title><style>{CSS}</style></head>
+<body><div class="viz-root">
 <h1>КОНВЕЙЕР УГАР · метрики по главам</h1>
-<p>Сгенерировано командой <code>ugar dashboard</code>. Пороги — из norms.json (02 §5).</p>
-{''.join(divs)}
-<script>{''.join(scripts)}</script>
-</body></html>
+<p class="meta">Сгенерировано `ugar dashboard`. Пороги — из norms.json (02 §5). Файл самодостаточен, сеть не нужна.</p>
+{''.join(figures)}
+</div></body></html>
 """
     path = ws.root / "dashboard.html"
-    guard.write_text(path, html)
+    guard.write_text(path, page)
     return path
