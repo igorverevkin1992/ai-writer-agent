@@ -11,6 +11,14 @@ from .paths import Workspace
 from .schemas import CheckResult, Edit, Flag, Resolution, Verdict
 
 
+def _anchor(text: str, quote: str, marker: str) -> str:
+    """Якорь флага в тексте (FR-E1): маркер после первого вхождения цитаты."""
+    quote = quote.strip()
+    if quote and quote in text and marker not in text:
+        return text.replace(quote, quote + marker, 1)
+    return text
+
+
 def build_review_pack(ws: Workspace, chapter: int, draft: int) -> Path:
     """FR-E1: текст с якорями флагов Э1/Э2 + форма правок + форма решений по самоволкам."""
     chdir = ws.chapter_dir(chapter)
@@ -21,6 +29,13 @@ def build_review_pack(ws: Workspace, chapter: int, draft: int) -> Path:
     if verdict_path.exists():
         checks = Verdict.model_validate(json.loads(verdict_path.read_text(encoding="utf-8"))).flags
     flags = verifier2.load_flags(ws, chapter)
+
+    # якоря в тексте: 【check_id】 для Э1, 【flag_id】 для Э2
+    for c in checks:
+        for q in c.quotes[:3]:
+            text = _anchor(text, q, f"【{c.check_id}】")
+    for f in flags:
+        text = _anchor(text, f.quote, f"【{f.flag_id}】")
 
     lines = [f"# Приёмка · Глава {chapter} · черновик {draft}", ""]
     lines += ["## Флаги Э1 (формальные)", ""]
@@ -84,7 +99,10 @@ def build_review_pack(ws: Workspace, chapter: int, draft: int) -> Path:
     return chdir / "review.md"
 
 
-_PAIR_RE = re.compile(r"БЫЛО:\s*(?P<before>.+?)\s*\nСТАЛО:\s*(?P<after>.+?)(?:\n|$)", re.DOTALL)
+# «СТАЛО» может занимать несколько строк — до пустой строки, следующего «БЫЛО:» или конца файла
+_PAIR_RE = re.compile(
+    r"БЫЛО:\s*(?P<before>.+?)\s*\nСТАЛО:\s*(?P<after>.+?)(?=\n\s*\n|\nБЫЛО:|\Z)", re.DOTALL
+)
 _FREE_RE = re.compile(r"^УКАЗАНИЕ:\s*(.+)$", re.MULTILINE)
 
 
@@ -94,6 +112,8 @@ def parse_edits_md(ws: Workspace, chapter: int) -> list[Edit]:
     if not path.exists():
         raise FileNotFoundError(f"Нет файла правок {path}. Сначала `ugar review {chapter}`.")
     text = path.read_text(encoding="utf-8")
+    # примеры формата в ограждённых код-блоках — не правки
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     edits: list[Edit] = []
     seq = 1
     for m in _PAIR_RE.finditer(text):

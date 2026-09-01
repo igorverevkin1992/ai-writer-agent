@@ -46,9 +46,12 @@ ugar canonize 7     # пакет записей в канон на подпис�
 ugar canonize 7 --apply   # правки MD + export + атомарный git-коммит (FR-K2)
 ```
 
-Сервисные команды: `status` (FR-D2), `dashboard` (FR-D1), `regress` и
-`add-golden` (FR-R1…R4), `rollback N --to <состояние>` (сценарий Г),
-`retest` (сценарий В, Д-10), `backup` (NFR-6).
+Сервисные команды: `status` (FR-D2), `dashboard` (FR-D1), `regress [--llm]` и
+`add-golden` (FR-R1…R4), `canon-commit -m "…"` — правка канона автором с
+валидацией и проверкой ссылки Р-№ при изменении норм (сценарий Б),
+`rollback N --to <состояние>` (сценарий Г), `retest` (сценарий В, Д-10),
+`backup` (NFR-6). Для оценки стоимости в `logs/api.jsonl` задайте цены
+моделей (`price_in_per_1m`/`price_out_per_1m`) в `config.yaml` (§6.3).
 
 ## Ключевые гарантии
 

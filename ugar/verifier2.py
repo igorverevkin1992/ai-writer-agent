@@ -33,10 +33,18 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
     brief = exporter.load_brief(exports_dir, chapter)
     matrix = exporter.load_matrix(exports_dir)
     infobans = exporter.load_infobans(exports_dir)
+    stoplists = exporter.load_stoplists(exports_dir)
+    continuity = exporter.load_continuity(exports_dir)
     plants = compiler.chapter_plants(exports_dir, brief)
     text = ws.draft_path(chapter, draft).read_text(encoding="utf-8")
 
     participants = sorted(set([brief.focal, *brief.participants]) - {""})
+    line_rules = [
+        f"- [{r.rule_id}] {r.applies_to.get('focal', 'все линии')}: {'; '.join(sorted(r.items))} ({r.action})"
+        for r in stoplists
+        if r.kind == "лексика" and r.scope == "0.3"
+        and ("focal" not in r.applies_to or r.applies_to["focal"] in participants)
+    ]
     matrix_slice = [
         f"- [{f.fact_id}] {f.subject}: {f.fact} "
         + (f"(узнаёт в гл. {f.from_chapter})" if f.from_chapter is not None else "(НЕ знает)")
@@ -61,6 +69,12 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
             "",
             "## Запреты информрежима (резервы будущих томов)",
             *[f"- [{b.ban_id}] {b.text}" for b in infobans],
+            "",
+            "## Стоп-листы линий (фокализация)",
+            *line_rules,
+            "",
+            "## Хронология (сверка дат и анахронизмов)",
+            *[f"- {c.date}: {c.event}" + (f" (гл. {c.chapters})" if c.chapters else "") for c in continuity],
             "",
             "## ТЕКСТ ГЛАВЫ",
             "",

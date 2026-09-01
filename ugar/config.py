@@ -20,6 +20,9 @@ class ModelConfig(BaseModel):
     provider: str
     model: str
     params: dict[str, Any] = Field(default_factory=dict)  # Д-6: параметры пинуются
+    # цены за 1 млн токенов (для cost_est в logs/api.jsonl, §6.3); 0 = не считать
+    price_in_per_1m: float = 0.0
+    price_out_per_1m: float = 0.0
 
 
 class ApiConfig(BaseModel):

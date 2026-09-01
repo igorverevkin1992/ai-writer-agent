@@ -25,7 +25,18 @@ class ManualModeNeeded(RuntimeError):
         self.hint = hint
 
 
-def _retry_call(fn, api: ApiConfig, logs_dir: Path, *, role: str, model: str, chapter: int | None):
+def _estimate_cost(mc: ModelConfig, tokens_in: int | None, tokens_out: int | None) -> float | None:
+    """Оценка стоимости вызова по ценам из config.yaml (§6.3)."""
+    if not mc.price_in_per_1m and not mc.price_out_per_1m:
+        return None
+    return round(
+        (tokens_in or 0) * mc.price_in_per_1m / 1_000_000
+        + (tokens_out or 0) * mc.price_out_per_1m / 1_000_000,
+        6,
+    )
+
+
+def _retry_call(fn, api: ApiConfig, logs_dir: Path, *, role: str, mc: ModelConfig, chapter: int | None):
     last_error: Exception | None = None
     for attempt in range(api.retries):
         start = time.monotonic()
@@ -34,9 +45,10 @@ def _retry_call(fn, api: ApiConfig, logs_dir: Path, *, role: str, model: str, ch
             log_call(
                 logs_dir,
                 role=role,
-                model=model,
+                model=mc.model,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
+                cost_est=_estimate_cost(mc, tokens_in, tokens_out),
                 chapter=chapter,
                 duration=time.monotonic() - start,
             )
@@ -46,7 +58,7 @@ def _retry_call(fn, api: ApiConfig, logs_dir: Path, *, role: str, model: str, ch
             log_call(
                 logs_dir,
                 role=role,
-                model=model,
+                model=mc.model,
                 chapter=chapter,
                 duration=time.monotonic() - start,
                 error=f"{type(e).__name__}: {e}",
@@ -54,7 +66,7 @@ def _retry_call(fn, api: ApiConfig, logs_dir: Path, *, role: str, model: str, ch
             if attempt < api.retries - 1:
                 time.sleep(api.backoff_base_s * (2**attempt))
     raise ManualModeNeeded(
-        f"Вызов {role} ({model}) не удался после {api.retries} попыток: {last_error}",
+        f"Вызов {role} ({mc.model}) не удался после {api.retries} попыток: {last_error}",
         "скопируйте входной файл (окно/промпт) в чат модели вручную и сохраните ответ "
         "в ожидаемый файл артефакта — каждый шаг такта исполним отдельно (FR-O2).",
     )
@@ -89,7 +101,7 @@ def call_gemini(prompt: str, mc: ModelConfig, api: ApiConfig, logs_dir: Path, ch
             getattr(usage, "candidates_token_count", None),
         )
 
-    return _retry_call(do, api, logs_dir, role="писатель", model=mc.model, chapter=chapter)
+    return _retry_call(do, api, logs_dir, role="писатель", mc=mc, chapter=chapter)
 
 
 def call_anthropic(
@@ -129,4 +141,4 @@ def call_anthropic(
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         return text, resp.usage.input_tokens, resp.usage.output_tokens
 
-    return _retry_call(do, api, logs_dir, role=role, model=mc.model, chapter=chapter)
+    return _retry_call(do, api, logs_dir, role=role, mc=mc, chapter=chapter)

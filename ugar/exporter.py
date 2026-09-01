@@ -86,6 +86,15 @@ def export_norms(library: Path) -> dict[str, Norm]:
     missing = [n for n in REQUIRED_NORMS if n not in norms]
     if missing:
         raise MarkupError(path, table.line, f"в таблице норм §5 нет обязательных id: {missing}")
+    empty = [
+        n for n in REQUIRED_NORMS
+        if norms[n].min is None and norms[n].max is None and norms[n].brak is None
+    ]
+    if empty:
+        raise MarkupError(
+            path, table.line,
+            f"обязательные нормы без числового значения (мин/макс/брак): {empty} (критерий приёмки 6)",
+        )
     return norms
 
 
@@ -297,6 +306,19 @@ def export_infobans(library: Path) -> list[InfoBan]:
     return bans
 
 
+def find_corpus_file(corpus_dir: Path, chapter: int, volume: int | None = None) -> Path | None:
+    """Файл корпуса главы по номеру (и тому). Точное совпадение номера:
+    «Глава1» не должна ловить «Глава10» (границы числа обязательны)."""
+    if not corpus_dir.exists():
+        return None
+    ch_rx = re.compile(rf"Глава0*{chapter}(?!\d)")
+    vol_rx = re.compile(rf"Том0*{volume}(?!\d)") if volume is not None else None
+    for f in sorted(corpus_dir.glob("*.txt")):
+        if ch_rx.search(f.stem) and (vol_rx is None or vol_rx.search(f.stem)):
+            return f
+    return None
+
+
 def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
     """corpus/ — принятые главы в нормализованном виде (для n-грамм и TTR)."""
     corpus_dir = exports_dir / "corpus"
@@ -386,6 +408,10 @@ def load_brief(exports_dir: Path, chapter: int) -> Brief:
         if b.chapter == chapter:
             return b
     raise FileNotFoundError(f"В поглавнике (briefs.json) нет главы {chapter}.")
+
+
+def load_continuity(exports_dir: Path) -> list[ContinuityEvent]:
+    return [ContinuityEvent.model_validate(r) for r in load_export(exports_dir, "continuity.json")]
 
 
 def load_dossiers(exports_dir: Path) -> list[Dossier]:

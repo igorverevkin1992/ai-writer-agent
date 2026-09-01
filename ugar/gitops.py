@@ -30,6 +30,8 @@ def head(repo: Path) -> str:
 def commit_all(repo: Path, message: str, author: str | None = None) -> str:
     """Атомарный коммит всех изменений (5.1). Авторство — автор (Д-8)."""
     _git(repo, "add", "-A")
+    if not dirty(repo):
+        return head(repo)  # нечего коммитить — не считаем ошибкой
     args = ["commit", "-m", message]
     if author:
         args += ["--author", author]

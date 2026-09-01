@@ -10,7 +10,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import exporter, guard, verifier1
+from . import adapters, exporter, guard, verifier1, verifier2
+from .config import Config
 from .paths import Workspace
 from .schemas import Brief, GoldenTest
 
@@ -64,18 +65,48 @@ def run_e1_test(ws: Workspace, test: GoldenTest) -> tuple[list[str], list[str], 
     return caught, missed, extra
 
 
-def run_regression(ws: Workspace, llm: bool = False) -> dict:
-    """FR-R2: Э1 всегда; Э2 (--llm) — по золотым тестам echelon=Э2 (полуручной прогон)."""
+def run_e2_test(ws: Workspace, cfg: Config, test: GoldenTest) -> tuple[list[str], list[str], list[str]]:
+    """Прогон Э2 по фрагменту через API Верификатора-2; ожидания — типы флагов."""
+    system = verifier2._template(ws, "верификатор2_система.md")
+    ctx = test.context_slice
+    user = "\n".join(
+        [
+            f"# Регрессионный тест {test.test_id}",
+            f"- Фокал: {ctx.get('focal', '')}",
+            f"- Год: {ctx.get('year', '')}",
+            "- Бриф: фрагмент вне брифа; любые факты, мотивировки и сентенции, "
+            "отсутствующие в этом контексте, — самоволка или нарушение брифа.",
+            "",
+            "## ТЕКСТ",
+            "",
+            test.fragment,
+        ]
+    )
+    raw = adapters.call_anthropic(
+        system, user, cfg.verifier2, cfg.api, ws.logs, role="верификатор-2 (регрессия)"
+    )
+    flags = verifier2.parse_flags(raw)
+    raised = {f.type for f in flags} | {"самоволка" for f in flags if f.kind == "samovolka"}
+    expected = set(test.expected_flags)
+    return sorted(raised & expected), sorted(expected - raised), sorted(raised - expected)
+
+
+def run_regression(ws: Workspace, llm: bool = False, cfg: Config | None = None) -> dict:
+    """FR-R2: Э1 всегда; Э2 — по флагу --llm (при недоступном API — пропуск с пометкой)."""
     tests = load_tests(ws)
     results = []
     for test in tests:
-        if test.echelon == "Э2" and not llm:
-            results.append({"test_id": test.test_id, "skipped": "Э2 (запустите с --llm)"})
-            continue
         if test.echelon == "Э2":
-            results.append({"test_id": test.test_id, "skipped": "Э2: прогон через verify2 вручную (Д-10)"})
-            continue
-        caught, missed, extra = run_e1_test(ws, test)
+            if not llm:
+                results.append({"test_id": test.test_id, "skipped": "Э2 (запустите с --llm)"})
+                continue
+            try:
+                caught, missed, extra = run_e2_test(ws, cfg or Config(), test)
+            except adapters.ManualModeNeeded as e:
+                results.append({"test_id": test.test_id, "skipped": f"Э2: API недоступен ({e.reason})"})
+                continue
+        else:
+            caught, missed, extra = run_e1_test(ws, test)
         results.append(
             {"test_id": test.test_id, "поймано": caught, "пропущено": missed, "лишние": extra}
         )

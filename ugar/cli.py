@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import shutil
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,10 +61,29 @@ def _manual(e: adapters.ManualModeNeeded) -> None:
     raise typer.Exit(code=2)
 
 
+def _friendly(fn):
+    """Ожидаемые ошибки (нет файла, структура MD, недопустимый переход FSM) —
+    читаемое сообщение вместо трейсбека."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (typer.Exit, typer.Abort):
+            raise  # собственные коды выхода — не ошибка
+        except adapters.ManualModeNeeded as e:
+            _manual(e)
+        except (FileNotFoundError, MarkupError, TransitionError, RuntimeError, ValueError) as e:
+            _fail(str(e))
+
+    return wrapper
+
+
 # ------------------------------------------------------------------ этап 1
 
 
 @app.command("export")
+@_friendly
 def cmd_export() -> None:
     """Перегенерировать все выгрузки из MD-библиотеки (FR-X1…FR-X3)."""
     ws, cfg, lib = _ctx()
@@ -76,6 +95,7 @@ def cmd_export() -> None:
 
 
 @app.command("compile")
+@_friendly
 def cmd_compile(chapter: int) -> None:
     """Собрать окно контекста главы N (FR-C1…FR-C6). Экспорт выполняется автоматически (риск R-5)."""
     ws, cfg, lib = _ctx()
@@ -92,6 +112,12 @@ def cmd_compile(chapter: int) -> None:
         st.transition("собрано", "compile")
     elif st.state == "собрано":
         st.transition("собрано", "compile (пересборка)")
+    else:
+        typer.secho(
+            f"⚠ Глава в состоянии «{st.state}»: окно пересобрано, но текущий черновик "
+            f"генерировался по старому окну — при необходимости `ugar rollback {chapter} --to собрано`.",
+            fg=typer.colors.YELLOW,
+        )
     typer.secho(f"Окно собрано: {path} (~{size} символов)", fg=typer.colors.GREEN)
     if (ws.chapter_dir(chapter) / "window_size_флаг.md").exists() and size > cfg.window_soft_limit_chars:
         typer.secho(
@@ -102,6 +128,7 @@ def cmd_compile(chapter: int) -> None:
 
 
 @app.command("write")
+@_friendly
 def cmd_write(chapter: int) -> None:
     """Отправить окно Писателю, сохранить draft_k.md (FR-W1)."""
     ws, cfg, lib = _ctx()
@@ -124,6 +151,7 @@ def _print_verdict(verdict) -> None:
 
 
 @app.command("verify1")
+@_friendly
 def cmd_verify1(chapter: int) -> None:
     """Формальные проверки Э1 (FR-V1.*). Брак метрик → авто-повтор генерации (≤2, §5.4)."""
     ws, cfg, lib = _ctx()
@@ -155,6 +183,7 @@ def cmd_verify1(chapter: int) -> None:
 
 
 @app.command("verify2")
+@_friendly
 def cmd_verify2(
     chapter: int,
     manual: bool = typer.Option(False, "--manual", help="Принять flags.json, заполненный вручную (NFR-3)."),
@@ -164,6 +193,11 @@ def cmd_verify2(
     st = ChapterState(ws, chapter)
     st.require("верифицировано-1")
     if manual:
+        if not (ws.chapter_dir(chapter) / "flags.json").exists():
+            _fail(
+                f"нет файла chapters/{chapter:03d}/flags.json — сохраните в него JSON-ответ модели "
+                f"(промпт: verify2_prompt.md), затем повторите `ugar verify2 {chapter} --manual`."
+            )
         flags = verifier2.load_flags(ws, chapter)
         typer.echo(f"Принят ручной flags.json: {len(flags)} флагов.")
     else:
@@ -183,6 +217,7 @@ def cmd_verify2(
 
 
 @app.command("review")
+@_friendly
 def cmd_review(chapter: int) -> None:
     """Пакет приёмки автора: review.md + edits.md + resolutions.json (FR-E1)."""
     ws, cfg, lib = _ctx()
@@ -198,6 +233,7 @@ def cmd_review(chapter: int) -> None:
 
 
 @app.command("apply-edits")
+@_friendly
 def cmd_apply_edits(
     chapter: int,
     manual: bool = typer.Option(False, "--manual", help="Черновик с правками сохранён вручную как draft_{k+1}.md."),
@@ -206,14 +242,14 @@ def cmd_apply_edits(
     ws, cfg, lib = _ctx()
     st = ChapterState(ws, chapter)
     st.require("на-приёмке", "дифф-контроль")
-    iteration = st.bump_edit_iterations()
-    if iteration > cfg.edit_cycle_max_iterations:
-        typer.secho(
-            f"Итераций правок больше {cfg.edit_cycle_max_iterations} (FR-E3) — внесите правки вручную "
-            f"в draft_{st.draft + 1}.md и выполните `ugar diff-check {chapter} --авторская-правка`.",
-            fg=typer.colors.YELLOW,
+    if not manual and st.data.get("итераций_правок", 0) >= cfg.edit_cycle_max_iterations:
+        _fail(
+            f"итераций правок уже {st.data['итераций_правок']} (лимит FR-E3) — внесите правки вручную: "
+            f"сохраните исправленный текст как draft_{st.draft + 1}.md, выполните "
+            f"`ugar apply-edits {chapter} --manual`, затем `ugar diff-check {chapter} --авторская-правка`."
         )
     edits = review_mod.parse_edits_md(ws, chapter)
+    st.bump_edit_iterations()
     st.data["база_правок"] = st.draft
     if manual:
         new_k = st.draft + 1
@@ -238,10 +274,11 @@ def cmd_apply_edits(
 
 
 @app.command("diff-check")
+@_friendly
 def cmd_diff_check(
     chapter: int,
     author_fix: bool = typer.Option(
-        False, "--авторская-правка", help="Текущий черновик правил сам автор — расхождения не самоволия."
+        False, "--авторская-правка", "--author-fix", help="Текущий черновик правил сам автор — расхождения не самоволия."
     ),
 ) -> None:
     """Дифф-контроль до/после правок (FR-V1.10, FR-E3)."""
@@ -271,6 +308,7 @@ def cmd_diff_check(
 
 
 @app.command("accept")
+@_friendly
 def cmd_accept(chapter: int, yes: bool = typer.Option(False, "--yes", "-y", help="Подтверждение без вопроса.")) -> None:
     """Приёмка главы автором (FR-E4): только из «дифф-контроль: чисто», с явным подтверждением."""
     ws, cfg, lib = _ctx()
@@ -293,6 +331,7 @@ def cmd_accept(chapter: int, yes: bool = typer.Option(False, "--yes", "-y", help
 
 
 @app.command("canonize")
+@_friendly
 def cmd_canonize(
     chapter: int,
     apply: bool = typer.Option(False, "--apply", help="Применить подписанный пакет (правки MD + export + git-коммит)."),
@@ -325,6 +364,7 @@ def cmd_canonize(
 
 
 @app.command("status")
+@_friendly
 def cmd_status() -> None:
     """Таблица глав и состояний FSM (FR-D2)."""
     ws, cfg, lib = _ctx()
@@ -342,6 +382,7 @@ def cmd_status() -> None:
 
 
 @app.command("rollback")
+@_friendly
 def cmd_rollback(
     chapter: int,
     to: str = typer.Option(..., "--to", help="Целевое состояние (из §5.4)."),
@@ -376,10 +417,11 @@ def cmd_rollback(
 
 
 @app.command("regress")
+@_friendly
 def cmd_regress(llm: bool = typer.Option(False, "--llm", help="Включить тесты Э2.")) -> None:
     """Прогон регрессионного корпуса золотых тестов (FR-R2)."""
     ws, cfg, lib = _ctx()
-    report = regression_mod.run_regression(ws, llm=llm)
+    report = regression_mod.run_regression(ws, llm=llm, cfg=cfg)
     for r in report["результаты"]:
         if r.get("skipped"):
             typer.echo(f"  ~ {r['test_id']}: пропущен ({r['skipped']})")
@@ -396,12 +438,13 @@ def cmd_regress(llm: bool = typer.Option(False, "--llm", help="Включить 
 
 
 @app.command("add-golden")
+@_friendly
 def cmd_add_golden(
     test_id: str,
     fragment_file: Path,
     expect: list[str] = typer.Option([], "--expect", help="Ожидаемый флаг (check_id), можно несколько раз."),
     focal: str = typer.Option("", "--focal"),
-    year: int = typer.Option(None, "--year"),
+    year: int | None = typer.Option(None, "--year"),
     echelon: str = typer.Option("Э1", "--echelon"),
 ) -> None:
     """Добавить золотой тест из пойманной автором ошибки (FR-R1)."""
@@ -418,6 +461,7 @@ def cmd_add_golden(
 
 
 @app.command("dashboard")
+@_friendly
 def cmd_dashboard() -> None:
     """Собрать dashboard.html (FR-D1)."""
     ws, cfg, lib = _ctx()
@@ -426,6 +470,7 @@ def cmd_dashboard() -> None:
 
 
 @app.command("run")
+@_friendly
 def cmd_run(chapter: int) -> None:
     """Такт целиком с паузами на шагах автора (FR-O1): review, accept, canonize."""
     ws, cfg, lib = _ctx()
@@ -439,15 +484,15 @@ def cmd_run(chapter: int) -> None:
         elif state == "сгенерировано":
             cmd_verify1(chapter)
         elif state == "верифицировано-1":
-            cmd_verify2(chapter)
+            cmd_verify2(chapter, manual=False)
         elif state == "верифицировано-2":
             cmd_review(chapter)
             typer.echo("⏸ Пауза такта: заполните edits.md и resolutions.json, затем снова `ugar run N`.")
             return
         elif state == "на-приёмке":
-            cmd_apply_edits(chapter)
+            cmd_apply_edits(chapter, manual=False)
         elif state == "правки":
-            cmd_diff_check(chapter)
+            cmd_diff_check(chapter, author_fix=False)
             st = ChapterState(ws, chapter)
             data = json.loads((ws.chapter_dir(chapter) / "diff_report.json").read_text(encoding="utf-8"))
             if data.get("not_applied") or data.get("unauthorized"):
@@ -458,7 +503,7 @@ def cmd_run(chapter: int) -> None:
             return
         elif state == "принято":
             if not (ws.chapter_dir(chapter) / "canon_batch.md").exists():
-                cmd_canonize(chapter, apply=False)
+                cmd_canonize(chapter, apply=False, yes=False)
             typer.echo(f"⏸ Пауза такта: подпишите пакет — `ugar canonize {chapter} --apply`.")
             return
         elif state == "зафиксировано":
@@ -467,9 +512,10 @@ def cmd_run(chapter: int) -> None:
 
 
 @app.command("retest")
+@_friendly
 def cmd_retest(
     chapter: int = typer.Option(1, "--chapter", help="Глава для свежего брифа пакета."),
-    fix: bool = typer.Option(False, "--зафиксировать", help="Зафиксировать результаты (требует зелёной регрессии, FR-R3)."),
+    fix: bool = typer.Option(False, "--зафиксировать", "--fix", help="Зафиксировать результаты (требует зелёной регрессии, FR-R3)."),
 ) -> None:
     """Пере-тест моделей (сценарий В, Д-10): пакет раунда 1 протокола отбора; прогон полуручной."""
     ws, cfg, lib = _ctx()
@@ -506,7 +552,45 @@ def _ensure_dir(path: Path) -> Path:
     return path
 
 
+@app.command("canon-commit")
+@_friendly
+def cmd_canon_commit(
+    message: str = typer.Option(..., "-m", "--message", help="Сообщение коммита (изменение норм — со ссылкой Р-№)."),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+) -> None:
+    """Правка канона автором (сценарий Б): валидация структуры, перегенерация выгрузок, коммит."""
+    ws, cfg, lib = _ctx()
+    if not gitops.is_repo(lib):
+        _fail("библиотека не под git — инициализируйте репозиторий.")
+    manifest = ws.exports / "manifest.json"
+    old_norms_hash = None
+    if manifest.exists():
+        old_norms_hash = json.loads(manifest.read_text(encoding="utf-8"))["files"].get("norms.json")
+    try:
+        hashes = exporter.run_export(lib, ws.exports, ws.logs)  # валидация Д-1 + выгрузки
+    except MarkupError as e:
+        _fail(f"структура MD расходится с соглашениями Д-1 → {e}")
+    if (
+        old_norms_hash is not None
+        and hashes["norms.json"] != old_norms_hash
+        and not gitops.check_norm_change_message(message)
+    ):
+        typer.secho(
+            "⚠ Изменены нормы (02 §5), но в сообщении коммита нет ссылки Р-№ на запись "
+            "в 36_Журнал — предупреждение, не блокировка (сценарий Б).",
+            fg=typer.colors.YELLOW,
+        )
+    if not gitops.dirty(lib):
+        typer.echo("В библиотеке нет изменений — коммитить нечего.")
+        return
+    if not yes and not typer.confirm(f"Закоммитить изменения библиотеки: «{message}»? (Д-8) (y)"):
+        raise typer.Exit()
+    commit = gitops.commit_all(lib, message, author=cfg.commit_author)
+    typer.secho(f"Канон закоммичен: {commit}", fg=typer.colors.GREEN)
+
+
 @app.command("backup")
+@_friendly
 def cmd_backup() -> None:
     """Напоминание/проверка свежести бэкапа (NFR-6): минимум два удалённых места."""
     ws, cfg, lib = _ctx()
@@ -524,6 +608,7 @@ def cmd_backup() -> None:
 
 
 @app.command("init")
+@_friendly
 def cmd_init() -> None:
     """Создать каркас рабочей области: config.yaml, .env.example, папки (NFR-1)."""
     ws = Workspace(Path.cwd())

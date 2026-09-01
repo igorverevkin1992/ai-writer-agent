@@ -68,9 +68,12 @@ def _llm_proposals(ws: Workspace, cfg: Config, chapter: int, text: str) -> dict:
             system, user, cfg.canonist, cfg.api, ws.logs, role="канонист", chapter=chapter
         )
         m = re.search(r"\{.*\}", raw, re.DOTALL)
-        return json.loads(m.group()) if m else {}
-    except adapters.ManualModeNeeded as e:
-        # деградация: пакет собирается без LLM, самоволки — дословными строками
+        if not m:
+            raise ValueError("в ответе Канониста нет JSON-объекта")
+        return json.loads(m.group())
+    except (adapters.ManualModeNeeded, ValueError, json.JSONDecodeError) as e:
+        # деградация (NFR-3): пакет собирается без LLM, самоволки — дословными строками
+        reason = e.reason if isinstance(e, adapters.ManualModeNeeded) else f"ответ не распарсен: {e}"
         return {
             "facts": [],
             "samovolki": [
@@ -79,7 +82,7 @@ def _llm_proposals(ws: Workspace, cfg: Config, chapter: int, text: str) -> dict:
             ],
             "edit_classes": [],
             "taste_rules": [],
-            "_manual_mode": str(e.reason),
+            "_manual_mode": reason,
         }
 
 
@@ -295,7 +298,9 @@ def _write_metrics(ws: Workspace, chapter: int) -> None:
 
 
 def _corpus_tokens(ws: Workspace, chapter: int) -> list[str]:
-    for pattern in (f"*Глава{chapter:02d}*.txt", f"*Глава{chapter}*.txt"):
-        for f in sorted(ws.corpus.glob(pattern)):
-            return f.read_text(encoding="utf-8").split()
-    return []
+    try:
+        volume = exporter.load_brief(ws.exports, chapter).volume
+    except FileNotFoundError:
+        volume = None
+    f = exporter.find_corpus_file(ws.corpus, chapter, volume)
+    return f.read_text(encoding="utf-8").split() if f else []

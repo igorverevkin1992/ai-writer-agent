@@ -7,6 +7,9 @@ writer:                      # Писатель (§6.1) — пин версии 
   provider: gemini
   model: "gemini-3.1-pro"    # R-6: уточнить точный ID при старте
   params: {}                 # Д-6: дефолтные параметры провайдера, при которых пройден отбор
+  # цены за 1 млн токенов для оценки стоимости в logs/api.jsonl (§6.3); 0 = не считать
+  price_in_per_1m: 0.0
+  price_out_per_1m: 0.0
 
 verifier2:                   # Верификатор-2 (§6.2, Д-11)
   provider: anthropic

@@ -19,7 +19,20 @@ from .schemas import Brief, CheckResult, DiffReport, Edit, Norm, StopRule, Verdi
 MAX_QUOTES = 10
 
 
-def _status(actual: float, norm: Norm, *, higher_worse: bool | None = None) -> str:
+def _norm_value(norms: dict[str, Norm], norm_id: str) -> float:
+    """Числовое значение нормы-параметра. Пороги берутся ТОЛЬКО из norms.json
+    (критерий приёмки 6) — отсутствие значения это ошибка канона, не повод
+    для зашитого в код умолчания."""
+    n = norms[norm_id]
+    value = n.max if n.max is not None else n.min
+    if value is None:
+        raise RuntimeError(
+            f"Норма «{norm_id}» (02 §5) не имеет числового значения — заполните таблицу норм в каноне."
+        )
+    return value
+
+
+def _status(actual: float, norm: Norm) -> str:
     """PASS/FLAG/BRAK по коридору нормы. BRAK — только если задан порог брака."""
     if norm.brak is not None:
         if norm.min is not None and actual < norm.brak:
@@ -67,11 +80,14 @@ def _find_items(text: str, items: list[str]) -> list[str]:
     return found
 
 
-def _quote_sentences(sentences: list[str], words_set: set[str]) -> list[str]:
+def _quote_sentences(sentences: list[str], items: set[str]) -> list[str]:
+    """Предложения-цитаты, содержащие любой из элементов (слово или оборот)."""
+    needles = {i.lower().replace("ё", "е") for i in items}
     quotes = []
     for s in sentences:
-        toks = {w.lower().replace("ё", "е") for w in textutils.words(s)}
-        if toks & words_set:
+        low = s.lower().replace("ё", "е")
+        toks = set(textutils.normalize(s))
+        if any(n in toks or (" " in n and n in low) for n in needles):
             quotes.append(s)
         if len(quotes) >= MAX_QUOTES:
             break
@@ -104,6 +120,7 @@ def run_verify1(ws: Workspace, chapter: int, draft: int) -> Verdict:
     window_path = ws.window_path(chapter)
     window_raw = window_path.read_text(encoding="utf-8") if window_path.exists() else ""
 
+    own = exporter.find_corpus_file(ws.corpus, chapter, brief.volume)
     checks = analyze(
         raw,
         window_raw,
@@ -111,7 +128,7 @@ def run_verify1(ws: Workspace, chapter: int, draft: int) -> Verdict:
         norms,
         stoplists,
         corpus_dir=ws.corpus,
-        own_stem=_own_corpus_stem(ws, chapter),
+        own_stem=own.stem if own else None,
         extra_abbr=ws.root / "сокращения.txt",  # пополняемый словарь (Д-2)
     )
     verdict = Verdict(chapter=chapter, draft=draft, checks=checks)
@@ -159,8 +176,8 @@ def analyze(
     avg = sum(lengths) / len(lengths) if lengths else 0.0
     add("V1.2a_средняя_длина", "средняя_длина", round(avg, 2))
 
-    short_thr = norms["короткая_фраза_порог"].max or 6
-    long_thr = norms["длинная_фраза_порог"].max or 25
+    short_thr = _norm_value(norms, "короткая_фраза_порог")
+    long_thr = _norm_value(norms, "длинная_фраза_порог")
     if lengths:
         add("V1.2b_доля_коротких", "доля_коротких", round(sum(1 for x in lengths if x <= short_thr) / len(lengths), 3))
         add("V1.2c_доля_длинных", "доля_длинных", round(sum(1 for x in lengths if x >= long_thr) / len(lengths), 3))
@@ -230,7 +247,7 @@ def analyze(
         )
 
     # FR-V1.6 — вставка окна («утечка промпта»)
-    leak_n = int(norms["утечка_нграмма"].max or 6)
+    leak_n = int(_norm_value(norms, "утечка_нграмма"))
     win_tokens = textutils.normalize(window_raw)
     leaks = (
         _matching_runs(tokens, set(textutils.ngrams(win_tokens, leak_n)), leak_n) if win_tokens else []
@@ -247,7 +264,7 @@ def analyze(
     )
 
     # FR-V1.7 — межглавные повторы против corpus/
-    rep_n = int(norms["повтор_нграмма"].max or 5)
+    rep_n = int(_norm_value(norms, "повтор_нграмма"))
     repeats: list[str] = []
     sources: list[str] = []
     if corpus_dir is not None and corpus_dir.exists():
@@ -283,7 +300,7 @@ def analyze(
             rule_source=norms["ttr_мин"].source,
         )
     )
-    win_size = int(norms["ttr_окно_слов"].max or 10_000)
+    win_size = int(_norm_value(norms, "ttr_окно_слов"))
     part_tokens: list[str] = []
     if corpus_dir is not None and corpus_dir.exists():
         for f in sorted(corpus_dir.glob("*.txt")):
@@ -308,13 +325,6 @@ def analyze(
 
     return checks
 
-
-def _own_corpus_stem(ws: Workspace, chapter: int) -> str | None:
-    """Имя файла корпуса этой же главы (чтобы не сравнивать главу саму с собой)."""
-    for pattern in (f"*Глава{chapter:02d}*", f"*Глава{chapter}*"):
-        for f in ws.corpus.glob(pattern + ".txt") if ws.corpus.exists() else []:
-            return f.stem
-    return None
 
 
 # ------------------------------------------------------- FR-V1.10 дифф-контроль

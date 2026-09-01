@@ -18,8 +18,9 @@ DOC_START = "→ ДОКУМЕНТ"
 DOC_END = "← КОНЕЦ ДОКУМЕНТА"
 
 _WORD_RE = re.compile(r"[А-Яа-яЁёA-Za-z0-9]+(?:-[А-Яа-яЁёA-Za-z0-9]+)*")
-_SENT_SPLIT_RE = re.compile(r"(?<=[.!?…])[»\"')\]]*\s+")
-_ABBR_MASK = ""
+# конец предложения: терминатор + закрывающие кавычки/скобки (остаются в предложении)
+_SENT_END_RE = re.compile(r"[.!?…]+[»«\"')\]]*")
+_ABBR_MASK = "\x01"  # непечатаемый маркер точки внутри сокращения
 
 
 def _load_abbreviations(extra_path: Path | None = None) -> list[str]:
@@ -71,11 +72,20 @@ def split_sentences(text: str, extra_abbr: Path | None = None) -> list[str]:
         para = para.strip()
         if not para:
             continue
-        # тире-реплика: «— Слова автора. — сказал он.» режем как обычные предложения
-        for chunk in _SENT_SPLIT_RE.split(para):
-            chunk = chunk.strip()
+        # тире-реплики режем как обычные предложения; терминатор внутри слова
+        # (десятичные числа) предложение не завершает
+        start = 0
+        for m in _SENT_END_RE.finditer(para):
+            end = m.end()
+            if end < len(para) and not para[end].isspace():
+                continue
+            chunk = para[start:end].strip()
             if chunk:
                 sentences.append(chunk.replace(_ABBR_MASK, "."))
+            start = end
+        tail = para[start:].strip()
+        if tail:
+            sentences.append(tail.replace(_ABBR_MASK, "."))
     return sentences
 
 
