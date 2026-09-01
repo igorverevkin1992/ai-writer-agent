@@ -639,6 +639,32 @@ def cmd_log(n: int = typer.Option(15, "-n", help="Сколько последн�
         typer.echo(f"Стоимость показанных вызовов: ${total_cost:.4f}")
 
 
+@app.command("panel", rich_help_panel="Обзор")
+@_friendly
+def cmd_panel(
+    port: int = typer.Option(8765, "--port", help="Порт локального сервера."),
+    open_browser: bool = typer.Option(True, "--открыть/--не-открывать", "--open/--no-open"),
+) -> None:
+    """Панель (этап 3): такт целиком в браузере — очередь, чтение с флагами,
+    правки, решения, дифф, приёмка, дашборд, журнал. Только 127.0.0.1, без облака."""
+    from . import server as server_mod
+
+    ws, cfg, lib = _ctx()
+    srv = server_mod.serve(ws, cfg, lib, port)
+    url = f"http://127.0.0.1:{port}/"
+    typer.secho(f"Панель запущена: {url} (остановка — Ctrl+C)", fg=typer.colors.GREEN)
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        typer.echo("\nПанель остановлена.")
+    finally:
+        srv.server_close()
+
+
 @app.command("find", rich_help_panel="Обзор")
 @_friendly
 def cmd_find(query: str) -> None:
