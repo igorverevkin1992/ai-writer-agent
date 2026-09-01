@@ -1,36 +1,95 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# КОНВЕЙЕР УГАР
 
-## Getting Started
+Программный конвейер производства книжной серии «УГАР» — реализация ТЗ v1.0
+(утверждено 31.08.2026, допущения Д-1…Д-12, Р-017).
 
-First, run the development server:
+Система автоматизирует производственный такт главы: сборку окна контекста из
+библиотеки канона, генерацию прозы LLM-Писателем (Gemini), двухэшелонную
+верификацию (скрипты + Claude), цикл авторских правок с дифф-контролем и
+фиксацию принятого в реестры канона — **при сохранении за автором всех
+канонических и вкусовых решений**. Весь контур локален; наружу выходят только
+вызовы двух API моделей.
+
+## Установка (NFR-1: macOS и Windows, без Docker и серверов)
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pip install -e ".[llm,dev]"   # llm — SDK google-genai и anthropic; dev — pytest
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Настройка рабочей области (папка проекта автора):
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+mkdir мой-проект && cd мой-проект
+ugar init                     # config.yaml, папки, .env.example
+# положите рядом УГАР_Библиотека/ (git-репозиторий канона)
+cp .env.example .env          # впишите GEMINI_API_KEY и ANTHROPIC_API_KEY (Д-9)
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Точные ID моделей пинуются в `config.yaml` (Д-6, Д-11, R-6). Без ключей API
+конвейер деградирует в ручной режим: каждый артефакт — человекочитаемый файл,
+промпты сохраняются, ответы моделей принимаются файлами (NFR-3).
 
-## Learn More
+## Такт главы (сценарий А)
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+ugar run 7          # весь такт с паузами на шагах автора (FR-O1), либо по шагам:
+ugar export         # MD-библиотека → exports/*.json (FR-X1…X3)
+ugar compile 7      # окно контекста по шаблону v1.1 (FR-C1…C6)
+ugar write 7        # Писатель → chapters/007/draft_1.md (FR-W1)
+ugar verify1 7      # Э1: формальные проверки; брак → авто-повтор ≤2 (FR-V1.*)
+ugar verify2 7      # Э2: смысловые проверки Claude → flags.json (FR-V2.*)
+ugar review 7       # пакет приёмки: review.md, edits.md, resolutions.json (FR-E1)
+ugar apply-edits 7  # Писатель вносит правки точно (FR-W2, FR-E3)
+ugar diff-check 7   # дифф-контроль: внесено / не внесено / самоволия (FR-V1.10)
+ugar accept 7       # приёмка автором — только из «дифф-контроль: чисто» (FR-E4)
+ugar canonize 7     # пакет записей в канон на подпись (FR-K1)
+ugar canonize 7 --apply   # правки MD + export + атомарный git-коммит (FR-K2)
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Сервисные команды: `status` (FR-D2), `dashboard` (FR-D1), `regress` и
+`add-golden` (FR-R1…R4), `rollback N --to <состояние>` (сценарий Г),
+`retest` (сценарий В, Д-10), `backup` (NFR-6).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Ключевые гарантии
 
-## Deploy on Vercel
+- **Пороги — только из канона.** Все нормы Э1 берутся из `exports/norms.json`,
+  сгенерированного из `02 §5`; в коде констант нет (критерий приёмки 6).
+- **Запись в канон — только через подпись.** Единая точка записи файлов
+  (`ugar/guard.py`) блокирует любой путь записи в `УГАР_Библиотека/`, кроме
+  `canonize --apply` после подтверждения автора (FR-K3, критерий 3).
+- **Детерминизм.** Одинаковые вход и выгрузки → байт-в-байт одинаковое окно
+  (FR-C4); `export` идемпотентен, хэши выгрузок логируются (FR-X3).
+- **Полная история.** Все артефакты такта хранятся в `chapters/N/` и не
+  удаляются (NFR-4); состояние главы — FSM в `status.yaml` (§5.4, Д-5).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Структура репозитория
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `ugar/` — пакет конвейера (CLI `ugar`, модули по реестру 4.2 ТЗ).
+- `ugar/templates/` — промпт-шаблоны (окно v1.1, режим правок, Верификатор-2,
+  Канонист); переопределяются копией в `templates/` рабочей области (§6.2).
+- `examples/УГАР_Библиотека/` — демо-библиотека по соглашениям разметки
+  (`ИНСТРУМЕНТ_Соглашения_разметки.md`, Д-1) — образец структуры и фикстура тестов.
+- `examples/regression_golden/` — стартовый регрессионный корпус «красных»
+  тестов (FR-R4; синтетические аналоги текстов отборочного теста).
+- `tests/` — pytest-набор по разделу 10 ТЗ: калибровка счётчиков (10.1),
+  флаговые тесты (10.2), FSM (10.5), сквозной такт с git-коммитом, защита канона.
+- `src/` — заготовка React-панели (этап 3, по желанию); к этапам 1–2 не относится.
+
+```bash
+python -m pytest tests/    # 48 тестов
+```
+
+## Соответствие этапности ТЗ
+
+- **Этап 1 «Скрипты»** — готов: exporter с валидацией, compiler, verifier-1
+  полностью, адаптеры API с журналом `logs/api.jsonl`, команды
+  `export/compile/write/verify1/status`.
+- **Этап 2 «Пайплайн»** — готов: FSM и `run`, verify2, цикл правок с
+  дифф-контролем, канонист, регрессия, дашборд, `rollback`.
+- **Этап 3 «Панель»** — не начат (по желанию); в `src/` лежит заготовка Next.js.
+
+При подключении реальной библиотеки: сверьте её структуру с
+`ИНСТРУМЕНТ_Соглашения_разметки.md` (правится документ и парсер — не канон),
+подставьте в калибровочные тесты замеренные значения реального макета
+`Проза/Том1_Глава04_МАКЕТ.md` (10.1) и добавьте настоящие «красные» тексты
+отборочного теста командой `ugar add-golden` (FR-R4).

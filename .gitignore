@@ -40,3 +40,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# КОНВЕЙЕР УГАР (Python)
+__pycache__/
+*.egg-info/
+.pytest_cache/
+# артефакты рабочей области конвейера (Д-9: секреты; NFR-5: журналы вне git)
+/exports/
+/chapters/
+/logs/
+/regression/report.json
+/retest/
+dashboard.html
