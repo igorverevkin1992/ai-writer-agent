@@ -64,6 +64,11 @@ def has_identity(repo: Path) -> bool:
     return bool(_git(repo, "config", "user.email", check=False).strip())
 
 
+def push(repo: Path, remote: str) -> None:
+    """Отправка текущей ветки в удалённое место (NFR-6, `ugar backup --push`)."""
+    _git(repo, "push", remote, "HEAD")
+
+
 def remotes(repo: Path) -> list[str]:
     out = _git(repo, "remote", check=False)
     return [r for r in out.splitlines() if r.strip()]

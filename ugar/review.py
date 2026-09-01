@@ -144,6 +144,13 @@ def load_edits(ws: Workspace, chapter: int) -> list[Edit]:
     ]
 
 
+def save_resolutions(ws: Workspace, chapter: int, resolutions: list[Resolution]) -> None:
+    guard.write_text(
+        ws.chapter_dir(chapter) / "resolutions.json",
+        json.dumps([r.model_dump() for r in resolutions], ensure_ascii=False, indent=2) + "\n",
+    )
+
+
 def load_resolutions(ws: Workspace, chapter: int) -> list[Resolution]:
     path = ws.chapter_dir(chapter) / "resolutions.json"
     if not path.exists():

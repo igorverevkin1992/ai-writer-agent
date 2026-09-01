@@ -4,13 +4,13 @@
 (в реальной библиотеке подставляются замеренные значения реального макета).
 """
 
+from importlib import resources
 from pathlib import Path
 
 from ugar import textutils
 
-MAKET = (
-    Path(__file__).resolve().parent.parent
-    / "examples/УГАР_Библиотека/Проза/Том1_Глава04_МАКЕТ.md"
+MAKET = Path(
+    str(resources.files("ugar").joinpath("data/демо/УГАР_Библиотека/Проза/Том1_Глава04_МАКЕТ.md"))
 )
 
 

@@ -82,7 +82,7 @@ def _friendly(fn):
 # ------------------------------------------------------------------ этап 1
 
 
-@app.command("export")
+@app.command("export", rich_help_panel="Такт главы")
 @_friendly
 def cmd_export() -> None:
     """Перегенерировать все выгрузки из MD-библиотеки (FR-X1…FR-X3)."""
@@ -94,7 +94,7 @@ def cmd_export() -> None:
     typer.secho(f"Выгрузки обновлены: {len(hashes)} файлов в {ws.exports}/", fg=typer.colors.GREEN)
 
 
-@app.command("compile")
+@app.command("compile", rich_help_panel="Такт главы")
 @_friendly
 def cmd_compile(chapter: int) -> None:
     """Собрать окно контекста главы N (FR-C1…FR-C6). Экспорт выполняется автоматически (риск R-5)."""
@@ -127,7 +127,7 @@ def cmd_compile(chapter: int) -> None:
         )
 
 
-@app.command("write")
+@app.command("write", rich_help_panel="Такт главы")
 @_friendly
 def cmd_write(chapter: int) -> None:
     """Отправить окно Писателю, сохранить draft_k.md (FR-W1)."""
@@ -151,7 +151,7 @@ def _print_verdict(verdict) -> None:
         typer.secho(f"  [{c.status}] {c.check_id}: {c.actual} (порог: {c.threshold})", fg=color)
 
 
-@app.command("verify1")
+@app.command("verify1", rich_help_panel="Такт главы")
 @_friendly
 def cmd_verify1(chapter: int) -> None:
     """Формальные проверки Э1 (FR-V1.*). Брак метрик → авто-повтор генерации (≤2, §5.4)."""
@@ -183,7 +183,7 @@ def cmd_verify1(chapter: int) -> None:
         st.set_draft(k)
 
 
-@app.command("verify2")
+@app.command("verify2", rich_help_panel="Такт главы")
 @_friendly
 def cmd_verify2(
     chapter: int,
@@ -217,7 +217,7 @@ def cmd_verify2(
     typer.secho(f"Э2 завершён: {len(flags)} флагов, из них самоволок: {sam}.", fg=typer.colors.GREEN)
 
 
-@app.command("review")
+@app.command("review", rich_help_panel="Такт главы")
 @_friendly
 def cmd_review(chapter: int) -> None:
     """Пакет приёмки автора: review.md + edits.md + resolutions.json (FR-E1)."""
@@ -233,7 +233,7 @@ def cmd_review(chapter: int) -> None:
     )
 
 
-@app.command("apply-edits")
+@app.command("apply-edits", rich_help_panel="Такт главы")
 @_friendly
 def cmd_apply_edits(
     chapter: int,
@@ -276,7 +276,7 @@ def cmd_apply_edits(
     typer.secho(f"Правки внесены ({len(edits)} шт.) → draft_{new_k}.md. Далее: `ugar diff-check {chapter}`.", fg=typer.colors.GREEN)
 
 
-@app.command("diff-check")
+@app.command("diff-check", rich_help_panel="Такт главы")
 @_friendly
 def cmd_diff_check(
     chapter: int,
@@ -321,7 +321,7 @@ def cmd_diff_check(
         typer.secho(f"Дифф-контроль чист. Далее: `ugar accept {chapter}`.", fg=typer.colors.GREEN)
 
 
-@app.command("accept")
+@app.command("accept", rich_help_panel="Такт главы")
 @_friendly
 def cmd_accept(chapter: int, yes: bool = typer.Option(False, "--yes", "-y", help="Подтверждение без вопроса.")) -> None:
     """Приёмка главы автором (FR-E4): только из «дифф-контроль: чисто», с явным подтверждением."""
@@ -344,7 +344,7 @@ def cmd_accept(chapter: int, yes: bool = typer.Option(False, "--yes", "-y", help
     typer.secho(f"Глава {chapter} принята. Далее: `ugar canonize {chapter}`.", fg=typer.colors.GREEN)
 
 
-@app.command("canonize")
+@app.command("canonize", rich_help_panel="Такт главы")
 @_friendly
 def cmd_canonize(
     chapter: int,
@@ -377,33 +377,319 @@ def cmd_canonize(
 # ------------------------------------------------------------- сервисные
 
 
-@app.command("status")
+# подсказка «что дальше» по состоянию FSM
+NEXT_STEP = {
+    "не-начато": "ugar compile {n}",
+    "собрано": "ugar write {n}",
+    "сгенерировано": "ugar verify1 {n}",
+    "верифицировано-1": "ugar verify2 {n}",
+    "верифицировано-2": "ugar review {n}",
+    "на-приёмке": "заполните edits.md и resolutions.json → ugar apply-edits {n}",
+    "правки": "ugar diff-check {n}",
+    "дифф-контроль": "ugar accept {n} (если чисто)",
+    "принято": "ugar canonize {n} → ugar canonize {n} --apply",
+    "зафиксировано": "готово ✓",
+}
+
+
+def _chapter_flags_summary(ws: Workspace, chapter: int) -> tuple[str, str]:
+    """(сводка Э1, сводка Э2) по артефактам главы."""
+    e1 = "—"
+    verdict_path = ws.chapter_dir(chapter) / "verdict.json"
+    if verdict_path.exists():
+        checks = json.loads(verdict_path.read_text(encoding="utf-8"))["checks"]
+        brak = sum(1 for c in checks if c["status"] == "BRAK")
+        flag = sum(1 for c in checks if c["status"] == "FLAG")
+        e1 = (f"брак {brak}, " if brak else "") + f"флагов {flag}"
+    e2 = "—"
+    flags = verifier2.load_flags(ws, chapter)
+    if (ws.chapter_dir(chapter) / "flags.json").exists():
+        sam = sum(1 for f in flags if f.kind == "samovolka")
+        e2 = f"флагов {len(flags) - sam}, самоволок {sam}"
+    return e1, e2
+
+
+@app.command("status", rich_help_panel="Обзор")
 @_friendly
-def cmd_status() -> None:
-    """Таблица глав и состояний FSM (FR-D2)."""
+def cmd_status(
+    chapter: int | None = typer.Argument(None, help="Номер главы — подробная карточка."),
+) -> None:
+    """Состояния глав и следующий шаг (FR-D2); `ugar status N` — карточка главы."""
     ws, cfg, lib = _ctx()
+    if chapter is not None:
+        _status_detail(ws, chapter)
+        return
     states = all_states(ws)
     if not states:
-        typer.echo("Глав в работе нет.")
+        typer.echo("Глав в работе нет. Начните: `ugar compile N`.")
         return
-    typer.echo(f"{'Глава':>6} | {'Состояние':<18} | {'Черновик':>8} | Авто-повт. | Итер. правок")
-    typer.echo("-" * 66)
+    typer.echo(f"{'Глава':>6} | {'Состояние':<18} | {'Чернов.':>7} | {'Э1':<16} | {'Э2':<22} | Дальше")
+    typer.echo("-" * 110)
     for st in states:
-        typer.echo(
-            f"{st.chapter:>6} | {st.state:<18} | {st.draft:>8} | "
-            f"{st.data.get('авто_повторов', 0):>10} | {st.data.get('итераций_правок', 0)}"
+        e1, e2 = _chapter_flags_summary(ws, st.chapter)
+        hint = NEXT_STEP.get(st.state, "").format(n=st.chapter)
+        typer.echo(f"{st.chapter:>6} | {st.state:<18} | {st.draft:>7} | {e1:<16} | {e2:<22} | {hint}")
+
+
+def _status_detail(ws: Workspace, chapter: int) -> None:
+    """Карточка главы: метрики вердикта, флаги, самоволки, следующий шаг."""
+    st = ChapterState(ws, chapter)
+    typer.secho(f"Глава {chapter} · состояние «{st.state}» · черновик {st.draft}", bold=True)
+    typer.echo(
+        f"Авто-повторов Э1: {st.data.get('авто_повторов', 0)}; итераций правок: {st.data.get('итераций_правок', 0)}"
+    )
+    verdict_path = ws.chapter_dir(chapter) / "verdict.json"
+    if verdict_path.exists():
+        from .schemas import Verdict
+
+        verdict = Verdict.model_validate(json.loads(verdict_path.read_text(encoding="utf-8")))
+        typer.echo(f"\nВердикт Э1 (черновик {verdict.draft}):")
+        _print_verdict(verdict)
+    flags = verifier2.load_flags(ws, chapter)
+    if flags:
+        typer.echo("\nФлаги Э2:")
+        for f in flags:
+            mark = "самоволка" if f.kind == "samovolka" else f.severity
+            typer.echo(f"  [{mark}] {f.flag_id} · {f.type}: {f.quote[:80]}")
+    unresolved = review_mod.unresolved_samovolki(ws, chapter)
+    if unresolved:
+        typer.secho(
+            f"\nБез решения автора: {', '.join(unresolved)} — `ugar resolve {chapter} <флаг> <решение>`",
+            fg=typer.colors.YELLOW,
         )
+    hint = NEXT_STEP.get(st.state, "").format(n=chapter)
+    typer.secho(f"\nДальше: {hint}", fg=typer.colors.GREEN)
 
 
-@app.command("rollback")
+@app.command("resolve", rich_help_panel="Правки и решения")
+@_friendly
+def cmd_resolve(
+    chapter: int,
+    flag_id: str | None = typer.Argument(None, help="ID самоволки (например F-001)."),
+    decision: str | None = typer.Argument(None, help="«вычеркнуть» или «канонизировать»."),
+    registry: str | None = typer.Option(None, "--реестр", "--registry", help="Целевой реестр (3.1/3.2/3.3/1.2)."),
+) -> None:
+    """Решения по самоволкам без ручной правки JSON (FR-V2.5).
+
+    Без аргументов — список; с флагом и решением — записывает решение.
+    """
+    ws, cfg, lib = _ctx()
+    resolutions = review_mod.load_resolutions(ws, chapter)
+    if flag_id is None:
+        if not resolutions:
+            typer.echo("Самоволок нет.")
+            return
+        flags = {f.flag_id: f for f in verifier2.load_flags(ws, chapter)}
+        for r in resolutions:
+            quote = flags[r.flag_id].quote[:70] if r.flag_id in flags else ""
+            state = r.decision or "БЕЗ РЕШЕНИЯ"
+            target = f" → {r.target_registry}" if r.target_registry else ""
+            typer.echo(f"  {r.flag_id}: {state}{target}  «{quote}»")
+        return
+    if decision not in ("вычеркнуть", "канонизировать"):
+        _fail("решение должно быть «вычеркнуть» или «канонизировать».")
+    for r in resolutions:
+        if r.flag_id == flag_id:
+            r.decision = decision  # type: ignore[assignment]
+            r.target_registry = registry if decision == "канонизировать" else None
+            review_mod.save_resolutions(ws, chapter, resolutions)
+            left = review_mod.unresolved_samovolki(ws, chapter)
+            typer.secho(f"{flag_id}: {decision}{' → ' + registry if registry else ''}.", fg=typer.colors.GREEN)
+            if left:
+                typer.echo(f"Осталось без решения: {', '.join(left)}")
+            return
+    _fail(f"самоволка {flag_id} не найдена (см. `ugar resolve {chapter}`).")
+
+
+@app.command("edits", rich_help_panel="Правки и решения")
+@_friendly
+def cmd_edits(chapter: int) -> None:
+    """Предпросмотр правок: как парсер понял edits.md (без вызова Писателя)."""
+    ws, cfg, lib = _ctx()
+    edits = review_mod.parse_edits_md(ws, chapter)
+    if not edits:
+        typer.echo("Правок не распознано (пары «БЫЛО:/СТАЛО:» и строки «УКАЗАНИЕ:»).")
+        return
+    draft = ws.draft_path(chapter, ChapterState(ws, chapter).draft)
+    text = draft.read_text(encoding="utf-8") if draft.exists() else ""
+    for e in edits:
+        if e.before:
+            found = "✓ найдено в черновике" if e.before in text else "✗ НЕ найдено в черновике дословно"
+            typer.echo(f"  {e.seq}. БЫЛО: {e.before[:70]}")
+            typer.echo(f"     СТАЛО: {e.after[:70]}   [{found}]")
+        else:
+            typer.echo(f"  {e.seq}. УКАЗАНИЕ: {e.after[:70]}")
+    bad = [e.seq for e in edits if e.before and e.before not in text]
+    if bad:
+        typer.secho(
+            f"⚠ Правки {bad}: «было» не найдено дословно — Писатель может их не внести. "
+            "Скопируйте цитату из черновика точно.",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.secho(f"Распознано {len(edits)} правок. Далее: `ugar apply-edits {chapter}`.", fg=typer.colors.GREEN)
+
+
+@app.command("check", rich_help_panel="Качество и регрессия")
+@_friendly
+def cmd_check(
+    file: Path = typer.Argument(..., help="Файл с текстом для проверки Э1."),
+    chapter: int | None = typer.Option(None, "--глава", "--chapter", help="Взять контекст (фокал/год/объём) из брифа главы."),
+    focal: str = typer.Option("", "--фокал", "--focal"),
+    year: int | None = typer.Option(None, "--год", "--year"),
+    volume_words: int | None = typer.Option(None, "--объём", "--volume"),
+) -> None:
+    """Прогнать проверки Э1 по произвольному файлу — вне такта и FSM (ручной режим, NFR-3)."""
+    ws, cfg, lib = _ctx()
+    from .schemas import Brief
+
+    if chapter is not None:
+        brief = exporter.load_brief(ws.exports, chapter)
+        window_path = ws.window_path(chapter)
+        window = window_path.read_text(encoding="utf-8") if window_path.exists() else ""
+    else:
+        brief = Brief(chapter=0, focal=focal, year=year, volume_words=volume_words)
+        window = ""
+    checks = verifier1.analyze(
+        file.read_text(encoding="utf-8"),
+        window,
+        brief,
+        exporter.load_norms(ws.exports),
+        exporter.load_stoplists(ws.exports),
+        corpus_dir=ws.corpus,
+        extra_abbr=ws.root / "сокращения.txt",
+    )
+    from .schemas import Verdict
+
+    _print_verdict(Verdict(chapter=brief.chapter, draft=0, checks=checks))
+    worst = "BRAK" if any(c.status == "BRAK" for c in checks) else (
+        "FLAG" if any(c.status == "FLAG" for c in checks) else "PASS"
+    )
+    color = {"PASS": typer.colors.GREEN, "FLAG": typer.colors.YELLOW, "BRAK": typer.colors.RED}[worst]
+    typer.secho(f"Итог: {worst}", fg=color)
+
+
+@app.command("diff", rich_help_panel="Правки и решения")
+@_friendly
+def cmd_diff(
+    chapter: int,
+    k1: int | None = typer.Argument(None, help="Номер первого черновика (по умолчанию предпоследний)."),
+    k2: int | None = typer.Argument(None, help="Номер второго (по умолчанию текущий)."),
+) -> None:
+    """Дифф черновиков главы (по умолчанию — два последних)."""
+    import difflib
+
+    ws, cfg, lib = _ctx()
+    st = ChapterState(ws, chapter)
+    if k2 is None:
+        k2 = st.draft
+    if k1 is None:
+        k1 = int(st.data.get("база_правок", k2 - 1))
+    a = ws.draft_path(chapter, k1).read_text(encoding="utf-8").splitlines()
+    b = ws.draft_path(chapter, k2).read_text(encoding="utf-8").splitlines()
+    diff = list(difflib.unified_diff(a, b, f"draft_{k1}", f"draft_{k2}", lineterm="", n=1))
+    if not diff:
+        typer.echo(f"draft_{k1} и draft_{k2} идентичны.")
+        return
+    for line in diff:
+        if line.startswith("+") and not line.startswith("+++"):
+            typer.secho(line, fg=typer.colors.GREEN)
+        elif line.startswith("-") and not line.startswith("---"):
+            typer.secho(line, fg=typer.colors.RED)
+        else:
+            typer.echo(line)
+
+
+@app.command("log", rich_help_panel="Обзор")
+@_friendly
+def cmd_log(n: int = typer.Option(15, "-n", help="Сколько последних вызовов показать.")) -> None:
+    """Последние API-вызовы: роль, модель, токены, стоимость (журнал §6.3)."""
+    from .apilog import read_log
+
+    ws, cfg, lib = _ctx()
+    rows = read_log(ws.logs)[-n:]
+    if not rows:
+        typer.echo("Журнал API пуст.")
+        return
+    total_cost = 0.0
+    for r in rows:
+        cost = r.get("cost_est")
+        total_cost += cost or 0
+        status = f"ОШИБКА: {r['error'][:40]}" if r.get("error") else (
+            f"in {r.get('tokens_in') or '?'} / out {r.get('tokens_out') or '?'}"
+            + (f" · ${cost:.4f}" if cost else "")
+        )
+        typer.echo(
+            f"  {r['ts'][:19]} · {r.get('role', '?'):<22} · {r.get('model', ''):<20} "
+            f"· гл. {r.get('chapter') or '—'} · {r.get('duration') or '?'} с · {status}"
+        )
+    if total_cost:
+        typer.echo(f"Стоимость показанных вызовов: ${total_cost:.4f}")
+
+
+@app.command("doctor", rich_help_panel="Обзор")
+@_friendly
+def cmd_doctor() -> None:
+    """Диагностика установки и готовности конвейера (NFR-1)."""
+    import importlib.util
+    import os
+
+    ws, cfg, lib = _ctx()
+
+    def item(ok: bool | None, label: str, hint: str = "") -> None:
+        mark, color = {True: ("✓", typer.colors.GREEN), False: ("✗", typer.colors.RED), None: ("~", typer.colors.YELLOW)}[ok]
+        typer.secho(f" {mark} {label}", fg=color)
+        if hint and ok is not True:
+            typer.echo(f"   → {hint}")
+
+    typer.secho(f"Рабочая область: {ws.root}", bold=True)
+    item((ws.root / "config.yaml").exists(), "config.yaml", "создайте: `ugar init`")
+    item(lib.exists(), f"библиотека канона: {lib}", "положите УГАР_Библиотека/ или поправьте library_dir в config.yaml")
+    if lib.exists():
+        item(gitops.is_repo(lib), "библиотека под git", "git init внутри библиотеки (версионирование канона, §5.1)")
+        if gitops.is_repo(lib):
+            item(gitops.has_identity(lib) or bool(cfg.commit_author), "авторство git настроено",
+                 "git config user.email/user.name или commit_author в config.yaml (Д-8)")
+            n_remotes = len(gitops.remotes(lib))
+            item(n_remotes >= cfg.backup_remotes_min, f"удалённых копий: {n_remotes} (нужно ≥{cfg.backup_remotes_min})",
+                 "добавьте git remote (NFR-6)")
+    manifest = ws.exports / "manifest.json"
+    item(manifest.exists(), "выгрузки exports/", "выполните `ugar export`")
+    item(bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")),
+         "GEMINI_API_KEY (Писатель)", "задайте в .env — иначе ручной режим (NFR-3)")
+    item(bool(os.environ.get("ANTHROPIC_API_KEY")), "ANTHROPIC_API_KEY (Верификатор-2/Канонист)",
+         "задайте в .env — иначе ручной режим (NFR-3)")
+    def has_module(name: str) -> bool:
+        try:
+            return importlib.util.find_spec(name) is not None
+        except ModuleNotFoundError:  # нет пакета-родителя (google.*)
+            return False
+
+    item(has_module("google.genai"), "SDK google-genai", "pip install 'ugar-pipeline[llm]'")
+    item(has_module("anthropic"), "SDK anthropic", "pip install 'ugar-pipeline[llm]'")
+    green = regression_mod.is_green(ws)
+    item(green, "регрессия зелёная" if green is not None else "регрессия ещё не запускалась",
+         "`ugar regress`" if green is None else "пропущенные флаги блокируют смену конфигурации (FR-R3)")
+    n_tests = len(regression_mod.load_tests(ws)) if ws.regression.exists() else 0
+    item(n_tests > 0, f"золотых тестов: {n_tests}", "пополните корпус: `ugar add-golden` (FR-R1)")
+
+
+@app.command("rollback", rich_help_panel="Канон и бэкап")
 @_friendly
 def cmd_rollback(
     chapter: int,
-    to: str = typer.Option(..., "--to", help="Целевое состояние (из §5.4)."),
+    to: str | None = typer.Option(None, "--to", help="Целевое состояние (§5.4); без него — на один шаг назад."),
     yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Откат главы в предыдущее состояние (сценарий Г)."""
+    """Откат главы в предыдущее состояние (сценарий Г); без --to — на шаг назад по истории."""
     ws, cfg, lib = _ctx()
+    if to is None:
+        history = ChapterState(ws, chapter).data.get("история", [])
+        prev = next((h["из"] for h in reversed(history) if h["из"] != h["в"]), None)
+        if prev is None:
+            _fail("история главы пуста — укажите цель отката явно: --to <состояние>.")
+        to = prev
+        typer.echo(f"Откат на шаг назад: → «{to}».")
     st = ChapterState(ws, chapter)
     if st.state == "зафиксировано":
         # только git-revert коммита приёмки с пересчётом выгрузок и корпуса
@@ -430,7 +716,7 @@ def cmd_rollback(
     typer.secho(f"Глава {chapter} → «{to}».", fg=typer.colors.GREEN)
 
 
-@app.command("regress")
+@app.command("regress", rich_help_panel="Качество и регрессия")
 @_friendly
 def cmd_regress(llm: bool = typer.Option(False, "--llm", help="Включить тесты Э2.")) -> None:
     """Прогон регрессионного корпуса золотых тестов (FR-R2)."""
@@ -451,7 +737,7 @@ def cmd_regress(llm: bool = typer.Option(False, "--llm", help="Включить 
         raise typer.Exit(code=1)
 
 
-@app.command("add-golden")
+@app.command("add-golden", rich_help_panel="Качество и регрессия")
 @_friendly
 def cmd_add_golden(
     test_id: str,
@@ -474,16 +760,22 @@ def cmd_add_golden(
     typer.secho(f"Золотой тест добавлен: {path}", fg=typer.colors.GREEN)
 
 
-@app.command("dashboard")
+@app.command("dashboard", rich_help_panel="Обзор")
 @_friendly
-def cmd_dashboard() -> None:
+def cmd_dashboard(
+    open_browser: bool = typer.Option(False, "--открыть", "--open", help="Открыть в браузере."),
+) -> None:
     """Собрать dashboard.html (FR-D1)."""
     ws, cfg, lib = _ctx()
     path = dashboard_mod.build_dashboard(ws)
     typer.secho(f"Дашборд: {path}", fg=typer.colors.GREEN)
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(path.as_uri())
 
 
-@app.command("run")
+@app.command("run", rich_help_panel="Такт главы")
 @_friendly
 def cmd_run(chapter: int) -> None:
     """Такт целиком с паузами на шагах автора (FR-O1): review, accept, canonize."""
@@ -525,7 +817,7 @@ def cmd_run(chapter: int) -> None:
             return
 
 
-@app.command("retest")
+@app.command("retest", rich_help_panel="Канон и бэкап")
 @_friendly
 def cmd_retest(
     chapter: int = typer.Option(1, "--chapter", help="Глава для свежего брифа пакета."),
@@ -566,7 +858,7 @@ def _ensure_dir(path: Path) -> Path:
     return path
 
 
-@app.command("canon-commit")
+@app.command("canon-commit", rich_help_panel="Канон и бэкап")
 @_friendly
 def cmd_canon_commit(
     message: str = typer.Option(..., "-m", "--message", help="Сообщение коммита (изменение норм — со ссылкой Р-№)."),
@@ -603,10 +895,13 @@ def cmd_canon_commit(
     typer.secho(f"Канон закоммичен: {commit}", fg=typer.colors.GREEN)
 
 
-@app.command("backup")
+@app.command("backup", rich_help_panel="Канон и бэкап")
 @_friendly
-def cmd_backup() -> None:
-    """Напоминание/проверка свежести бэкапа (NFR-6): минимум два удалённых места."""
+def cmd_backup(
+    push: bool = typer.Option(False, "--push", help="Отправить библиотеку во все удалённые места (после y)."),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+) -> None:
+    """Проверка свежести бэкапа (NFR-6); --push — отправить во все remotes."""
     ws, cfg, lib = _ctx()
     if not gitops.is_repo(lib):
         _fail("библиотека не под git — инициализируйте репозиторий.")
@@ -615,15 +910,28 @@ def cmd_backup() -> None:
     if len(remotes) < cfg.backup_remotes_min:
         typer.secho("⚠ Добавьте удалённые репозитории/внешние копии (NFR-6).", fg=typer.colors.YELLOW)
     if gitops.dirty(lib):
-        typer.secho("⚠ В библиотеке незакоммиченные изменения.", fg=typer.colors.YELLOW)
+        typer.secho("⚠ В библиотеке незакоммиченные изменения (`ugar canon-commit`).", fg=typer.colors.YELLOW)
     age = gitops.last_commit_age_days(lib)
     if age is not None:
         typer.echo(f"Последний коммит: {age:.1f} дн. назад.")
+    if push:
+        if not remotes:
+            _fail("нет удалённых репозиториев — добавьте git remote.")
+        if not yes and not typer.confirm(f"Отправить в {len(remotes)} удалённых мест? (y)"):
+            raise typer.Exit()
+        for remote in remotes:
+            try:
+                gitops.push(lib, remote)
+                typer.secho(f" ✓ {remote}", fg=typer.colors.GREEN)
+            except RuntimeError as e:
+                typer.secho(f" ✗ {remote}: {e}", fg=typer.colors.RED)
 
 
-@app.command("init")
+@app.command("init", rich_help_panel="Настройка")
 @_friendly
-def cmd_init() -> None:
+def cmd_init(
+    demo: bool = typer.Option(False, "--демо", "--demo", help="Развернуть демо-библиотеку и золотые тесты — играбельный пример."),
+) -> None:
     """Создать каркас рабочей области: config.yaml, .env.example, папки (NFR-1)."""
     ws = Workspace(Path.cwd())
     if not (ws.root / "config.yaml").exists():
@@ -633,7 +941,24 @@ def cmd_init() -> None:
     env_example = ws.root / ".env.example"
     if not env_example.exists():
         env_example.write_text("GEMINI_API_KEY=\nANTHROPIC_API_KEY=\n", encoding="utf-8")
+    if demo:
+        from importlib import resources
+
+        demo_root = Path(str(resources.files("ugar").joinpath("data/демо")))
+        if not (ws.root / "УГАР_Библиотека").exists():
+            shutil.copytree(demo_root / "УГАР_Библиотека", ws.root / "УГАР_Библиотека")
+        for f in (demo_root / "регрессия").glob("*.json"):
+            target = ws.regression / "golden" / f.name
+            if not target.exists():
+                shutil.copyfile(f, target)
+        typer.secho(
+            "Демо развёрнуто. Попробуйте: `ugar export` → `ugar compile 1` → `ugar status` → `ugar regress`.",
+            fg=typer.colors.GREEN,
+        )
+        typer.echo("Ключи API не обязательны: без них каждый шаг подскажет ручной режим (NFR-3).")
+        return
     typer.secho("Рабочая область готова. Заполните config.yaml и .env (Д-9), положите УГАР_Библиотека/.", fg=typer.colors.GREEN)
+    typer.echo("Хотите пощупать конвейер на примере — `ugar init --демо`. Диагностика: `ugar doctor`.")
 
 
 def main() -> None:  # точка входа для python -m ugar.cli

@@ -25,7 +25,7 @@ ugar = "ugar.cli:app"
 packages = ["ugar"]
 
 [tool.setuptools.package-data]
-ugar = ["data/*", "templates/*"]
+ugar = ["data/**/*", "templates/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
