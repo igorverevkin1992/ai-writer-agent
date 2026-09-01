@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from . import adapters, exporter, gitops, guard, review, verifier2
+from . import adapters, exporter, gitops, guard, llmjson, review, verifier2
 from .config import Config
 from .paths import Workspace
 from .schemas import Verdict
@@ -67,10 +67,7 @@ def _llm_proposals(ws: Workspace, cfg: Config, chapter: int, text: str) -> dict:
         raw = adapters.call_anthropic(
             system, user, cfg.canonist, cfg.api, ws.logs, role="канонист", chapter=chapter
         )
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m:
-            raise ValueError("в ответе Канониста нет JSON-объекта")
-        return json.loads(m.group())
+        return llmjson.extract_json(raw, dict)
     except (adapters.ManualModeNeeded, ValueError, json.JSONDecodeError) as e:
         # деградация (NFR-3): пакет собирается без LLM, самоволки — дословными строками
         reason = e.reason if isinstance(e, adapters.ManualModeNeeded) else f"ответ не распарсен: {e}"
@@ -173,7 +170,21 @@ def apply_batch(ws: Workspace, cfg: Config, library: Path, chapter: int, draft: 
     """FR-K2: применяет подписанный пакет = правки MD + export + атомарный git-коммит.
 
     Вызывается ТОЛЬКО после явного подтверждения автора (CLI, Д-8).
+    Перед ЛЮБОЙ записью — проверки, что коммит завершится: повторное применение
+    после сорвавшегося коммита продублировало бы строки реестров.
     """
+    if gitops.is_repo(library):
+        if gitops.dirty(library):
+            raise RuntimeError(
+                "в библиотеке незакоммиченные изменения — применение пакета требует чистого git "
+                "(защита от двойного применения). Закоммитьте их (`ugar canon-commit`) или откатите "
+                "(`git restore .`), затем повторите."
+            )
+        if not gitops.has_identity(library):
+            raise RuntimeError(
+                "git не настроен: задайте user.name/user.email в библиотеке "
+                "(git config user.email …) — иначе коммит приёмки сорвётся после записи в канон."
+            )
     batch_path = ws.chapter_dir(chapter) / "canon_batch.md"
     proposals = json.loads((ws.chapter_dir(chapter) / "canon_batch.json").read_text(encoding="utf-8"))
     accepted_rows: list[tuple[str, str]] = []

@@ -342,16 +342,25 @@ def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
 
 
 def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, str]:
-    """Перегенерирует все выгрузки (FR-X1). Возвращает {файл: sha256}."""
+    """Перегенерирует все выгрузки (FR-X1). Возвращает {файл: sha256}.
+
+    Сначала разбирается ВЕСЬ канон, и только затем пишутся файлы: ошибка
+    структуры в одном документе не оставляет exports/ в смешанном состоянии
+    со старым manifest.json (контроль дрейфа, FR-X3).
+    """
+    parsed = {
+        "norms.json": export_norms(library),
+        "stoplists.json": export_stoplists(library),
+        "matrix.json": export_matrix(library),
+        "plants.json": export_plants(library),
+        "continuity.json": export_continuity(library),
+        "briefs.json": export_briefs(library),
+        "dossiers.json": export_dossiers(library),
+        "infobans.json": export_infobans(library),
+    }
     hashes: dict[str, str] = {}
-    hashes["norms.json"] = _dump(exports_dir / "norms.json", export_norms(library))
-    hashes["stoplists.json"] = _dump(exports_dir / "stoplists.json", export_stoplists(library))
-    hashes["matrix.json"] = _dump(exports_dir / "matrix.json", export_matrix(library))
-    hashes["plants.json"] = _dump(exports_dir / "plants.json", export_plants(library))
-    hashes["continuity.json"] = _dump(exports_dir / "continuity.json", export_continuity(library))
-    hashes["briefs.json"] = _dump(exports_dir / "briefs.json", export_briefs(library))
-    hashes["dossiers.json"] = _dump(exports_dir / "dossiers.json", export_dossiers(library))
-    hashes["infobans.json"] = _dump(exports_dir / "infobans.json", export_infobans(library))
+    for name, data in parsed.items():
+        hashes[name] = _dump(exports_dir / name, data)
     hashes.update(export_corpus(library, exports_dir))
 
     manifest = {"files": hashes}

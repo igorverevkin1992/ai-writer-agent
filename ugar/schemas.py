@@ -173,6 +173,8 @@ class DiffReport(BaseModel):
     applied_share: float
     not_applied: list[int] = Field(default_factory=list)      # seq невнесённых правок
     unauthorized: list[str] = Field(default_factory=list)     # самовольные изменения
+    # свободные указания (УКАЗАНИЕ:): механически не проверяемы, приёмку не блокируют
+    unverifiable: list[int] = Field(default_factory=list)
 
     @property
     def clean(self) -> bool:

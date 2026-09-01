@@ -59,6 +59,11 @@ def revert(repo: Path, commit: str) -> str:
     return head(repo)
 
 
+def has_identity(repo: Path) -> bool:
+    """Есть ли у git настроенное авторство (иначе коммит сорвётся)."""
+    return bool(_git(repo, "config", "user.email", check=False).strip())
+
+
 def remotes(repo: Path) -> list[str]:
     out = _git(repo, "remote", check=False)
     return [r for r in out.splitlines() if r.strip()]

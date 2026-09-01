@@ -140,6 +140,7 @@ def cmd_write(chapter: int) -> None:
     except adapters.ManualModeNeeded as e:
         _manual(e)
     st.set_draft(k)
+    st.reset_retries()  # свежая генерация — бюджет авто-повторов §5.4 заново
     st.transition("сгенерировано", "write")
     typer.secho(f"Черновик получен: {ws.draft_path(chapter, k)}", fg=typer.colors.GREEN)
 
@@ -249,9 +250,10 @@ def cmd_apply_edits(
             f"`ugar apply-edits {chapter} --manual`, затем `ugar diff-check {chapter} --авторская-правка`."
         )
     edits = review_mod.parse_edits_md(ws, chapter)
-    st.bump_edit_iterations()
     st.data["база_правок"] = st.draft
     if manual:
+        # завершение сорвавшейся автоматической итерации либо ручная правка автора —
+        # бюджет итераций FR-E3 (для циклов Писателя) не расходуется
         new_k = st.draft + 1
         if not ws.draft_path(chapter, new_k).exists():
             _fail(f"нет файла {ws.draft_path(chapter, new_k)} (ручной режим).")
@@ -268,6 +270,7 @@ def cmd_apply_edits(
                 f"сохраните ответ как draft_{st.draft + 1}.md и выполните `ugar apply-edits {chapter} --manual`."
             )
             _manual(e)
+        st.bump_edit_iterations()  # итерация Писателя состоялась
     st.set_draft(new_k)
     st.transition("правки", "apply-edits")
     typer.secho(f"Правки внесены ({len(edits)} шт.) → draft_{new_k}.md. Далее: `ugar diff-check {chapter}`.", fg=typer.colors.GREEN)
@@ -284,7 +287,7 @@ def cmd_diff_check(
     """Дифф-контроль до/после правок (FR-V1.10, FR-E3)."""
     ws, cfg, lib = _ctx()
     st = ChapterState(ws, chapter)
-    st.require("правки")
+    st.require("правки", "дифф-контроль")  # повторный прогон/подтверждение разрешён
     edits = review_mod.load_edits(ws, chapter)
     base = int(st.data.get("база_правок", st.draft - 1))
     report = verifier1.diff_check(ws, chapter, base, st.draft, edits)
@@ -296,10 +299,21 @@ def cmd_diff_check(
         )
     st.transition("дифф-контроль", "diff-check")
     typer.echo(f"Внесено правок: {report.applied_share:.0%}; не внесено: {report.not_applied or '—'}")
+    if report.unverifiable:
+        typer.secho(
+            f"Свободные указания {report.unverifiable}: механически не проверяются — "
+            "оцените их результат глазами (приёмку не блокируют).",
+            fg=typer.colors.YELLOW,
+        )
     if report.unauthorized:
         typer.secho(f"Самовольные изменения ({len(report.unauthorized)}):", fg=typer.colors.RED)
         for u in report.unauthorized[:10]:
             typer.echo(f"  > {u[:200]}")
+        if report.unverifiable:
+            typer.echo(
+                "Часть изменений может быть следствием свободных указаний — если это так, "
+                f"подтвердите `ugar diff-check {chapter} --авторская-правка`."
+            )
         typer.echo(f"Цикл повторяется: поправьте edits.md и выполните `ugar apply-edits {chapter}` (≤{cfg.edit_cycle_max_iterations} итераций).")
     elif report.not_applied:
         typer.secho("Часть правок не внесена — повторите цикл.", fg=typer.colors.YELLOW)

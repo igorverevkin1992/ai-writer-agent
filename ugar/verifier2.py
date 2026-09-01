@@ -8,13 +8,12 @@ chapters/N/verify2_prompt.md для ручного прогона (NFR-3).
 from __future__ import annotations
 
 import json
-import re
 from importlib import resources
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import adapters, compiler, exporter, guard
+from . import adapters, compiler, exporter, guard, llmjson
 from .config import Config
 from .paths import Workspace
 from .schemas import Flag
@@ -68,7 +67,12 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
             *[f"- [{p.plant_id}] {p.what}" for p in plants],
             "",
             "## Запреты информрежима (резервы будущих томов)",
-            *[f"- [{b.ban_id}] {b.text}" for b in infobans],
+            *[
+                f"- [{b.ban_id}] {b.text}"
+                for b in infobans
+                # тот же фильтр, что у компилятора: истёкшие запреты — не нарушение
+                if b.until_volume is None or brief.volume <= b.until_volume
+            ],
             "",
             "## Стоп-листы линий (фокализация)",
             *line_rules,
@@ -85,10 +89,10 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
 
 
 def parse_flags(raw: str) -> list[Flag]:
-    m = re.search(r"\[.*\]", raw, re.DOTALL)
-    if not m:
-        raise ValueError("В ответе Верификатора-2 не найден JSON-массив флагов.")
-    data = json.loads(m.group())
+    try:
+        data = llmjson.extract_json(raw, list)
+    except ValueError as e:
+        raise ValueError(f"Ответ Верификатора-2: {e}") from e
     flags = []
     for i, item in enumerate(data, start=1):
         item.setdefault("flag_id", f"F-{i:03d}")

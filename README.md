@@ -79,7 +79,7 @@ ugar canonize 7 --apply   # правки MD + export + атомарный git-к
 - `src/` — заготовка React-панели (этап 3, по желанию); к этапам 1–2 не относится.
 
 ```bash
-python -m pytest tests/    # 48 тестов
+python -m pytest tests/    # 73 теста
 ```
 
 ## Соответствие этапности ТЗ

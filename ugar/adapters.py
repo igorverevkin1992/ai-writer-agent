@@ -36,6 +36,17 @@ def _estimate_cost(mc: ModelConfig, tokens_in: int | None, tokens_out: int | Non
     )
 
 
+def _retryable(e: Exception) -> bool:
+    """Ретраим только сетевые/временные ошибки (§6.3): 5xx, 408, 429 и ошибки
+    без HTTP-статуса. Постоянные клиентские (401/403/404/422…) — сразу стоп."""
+    status = getattr(e, "status_code", None)
+    if status is None:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return status >= 500 or status in (408, 429)
+    return True
+
+
 def _retry_call(fn, api: ApiConfig, logs_dir: Path, *, role: str, mc: ModelConfig, chapter: int | None):
     last_error: Exception | None = None
     for attempt in range(api.retries):
@@ -53,7 +64,7 @@ def _retry_call(fn, api: ApiConfig, logs_dir: Path, *, role: str, mc: ModelConfi
                 duration=time.monotonic() - start,
             )
             return text
-        except Exception as e:  # сетевые/5xx — ретраим с экспоненциальной паузой
+        except Exception as e:
             last_error = e
             log_call(
                 logs_dir,
@@ -63,6 +74,8 @@ def _retry_call(fn, api: ApiConfig, logs_dir: Path, *, role: str, mc: ModelConfi
                 duration=time.monotonic() - start,
                 error=f"{type(e).__name__}: {e}",
             )
+            if not _retryable(e):
+                break
             if attempt < api.retries - 1:
                 time.sleep(api.backoff_base_s * (2**attempt))
     raise ManualModeNeeded(

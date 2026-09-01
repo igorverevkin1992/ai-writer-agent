@@ -186,15 +186,14 @@ def analyze(
 
     if brief.volume_words:
         deviation = abs(n_words - brief.volume_words) / brief.volume_words
-        norm = norms["объём_допуск"]
-        status = "BRAK" if norm.max is not None and deviation > norm.max else "PASS"
+        tolerance = _norm_value(norms, "объём_допуск")
         checks.append(
             CheckResult(
                 check_id="V1.2e_объём",
-                status=status,
-                threshold=f"{brief.volume_words} слов ± {norm.max:.0%}",
+                status="BRAK" if deviation > tolerance else "PASS",
+                threshold=f"{brief.volume_words} слов ± {tolerance:.0%}",
                 actual=f"{n_words} слов (отклонение {deviation:.0%})",
-                rule_source=norm.source,
+                rule_source=norms["объём_допуск"].source,
             )
         )
 
@@ -331,14 +330,21 @@ def analyze(
 
 
 def diff_check(ws: Workspace, chapter: int, draft_before: int, draft_after: int, edits: list[Edit]) -> DiffReport:
-    """Сопоставление черновиков до/после правок: внесено / не внесено / самоволия."""
+    """Сопоставление черновиков до/после правок: внесено / не внесено / самоволия.
+
+    Свободные указания (пустое «было») механически не проверяемы: текст указания
+    не обязан появиться в прозе. Они выносятся в unverifiable и приёмку не
+    блокируют — их результат автор оценивает глазами.
+    """
     old = ws.draft_path(chapter, draft_before).read_text(encoding="utf-8")
     new = ws.draft_path(chapter, draft_after).read_text(encoding="utf-8")
 
+    verifiable = [e for e in edits if e.before.strip()]
+    unverifiable = [e.seq for e in edits if not e.before.strip()]
     applied = 0
     not_applied: list[int] = []
-    for e in edits:
-        ok_removed = (not e.before.strip()) or (e.before not in new)
+    for e in verifiable:
+        ok_removed = e.before not in new
         ok_added = (not e.after.strip()) or (e.after in new)
         if ok_removed and ok_added:
             applied += 1
@@ -367,9 +373,10 @@ def diff_check(ws: Workspace, chapter: int, draft_before: int, draft_after: int,
         chapter=chapter,
         draft_before=draft_before,
         draft_after=draft_after,
-        applied_share=round(applied / len(edits), 3) if edits else 1.0,
+        applied_share=round(applied / len(verifiable), 3) if verifiable else 1.0,
         not_applied=not_applied,
         unauthorized=unauthorized[:MAX_QUOTES * 2],
+        unverifiable=unverifiable,
     )
     guard.write_text(
         ws.chapter_dir(chapter) / "diff_report.json",
