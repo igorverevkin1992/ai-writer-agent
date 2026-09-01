@@ -129,20 +129,32 @@ def cmd_compile(chapter: int) -> None:
 
 @app.command("write", rich_help_panel="Такт главы")
 @_friendly
-def cmd_write(chapter: int) -> None:
+def cmd_write(
+    chapter: int,
+    manual: bool = typer.Option(
+        False, "--manual", help="Зарегистрировать черновик, сохранённый вручную как draft_{k+1}.md (NFR-3)."
+    ),
+) -> None:
     """Отправить окно Писателю, сохранить draft_k.md (FR-W1)."""
     ws, cfg, lib = _ctx()
     st = ChapterState(ws, chapter)
     st.require("собрано", "сгенерировано")
     k = st.draft + 1
-    try:
-        writer.write_chapter(ws, cfg, chapter, k)
-    except adapters.ManualModeNeeded as e:
-        _manual(e)
+    if manual:
+        if not ws.draft_path(chapter, k).exists():
+            _fail(
+                f"нет файла {ws.draft_path(chapter, k)} — скопируйте окно в чат модели, "
+                f"сохраните ответ этим файлом и повторите (ручной режим)."
+            )
+    else:
+        try:
+            writer.write_chapter(ws, cfg, chapter, k)
+        except adapters.ManualModeNeeded as e:
+            _manual(e)
     st.set_draft(k)
     st.reset_retries()  # свежая генерация — бюджет авто-повторов §5.4 заново
-    st.transition("сгенерировано", "write")
-    typer.secho(f"Черновик получен: {ws.draft_path(chapter, k)}", fg=typer.colors.GREEN)
+    st.transition("сгенерировано", "write" + (" (manual)" if manual else ""))
+    typer.secho(f"Черновик {'принят' if manual else 'получен'}: {ws.draft_path(chapter, k)}", fg=typer.colors.GREEN)
 
 
 def _print_verdict(verdict) -> None:
@@ -650,7 +662,10 @@ def cmd_panel(
     from . import server as server_mod
 
     ws, cfg, lib = _ctx()
-    srv = server_mod.serve(ws, cfg, lib, port)
+    try:
+        srv = server_mod.serve(ws, cfg, lib, port)
+    except OSError as e:
+        _fail(f"порт {port} занят или недоступен ({e}) — укажите другой: `ugar panel --port 8766`.")
     url = f"http://127.0.0.1:{port}/"
     typer.secho(f"Панель запущена: {url} (остановка — Ctrl+C)", fg=typer.colors.GREEN)
     if open_browser:
@@ -854,7 +869,7 @@ def cmd_run(chapter: int) -> None:
         if state == "не-начато":
             cmd_compile(chapter)
         elif state == "собрано":
-            cmd_write(chapter)
+            cmd_write(chapter, manual=False)
         elif state == "сгенерировано":
             cmd_verify1(chapter)
         elif state == "верифицировано-1":

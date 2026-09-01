@@ -3,14 +3,26 @@ import { apiGet, apiPost } from "./api";
 import { ChapterView } from "./ChapterView";
 import type { ApiLogRow, AppState, Job } from "./types";
 
-type View = { kind: "глава"; n: number } | { kind: "дашборд" } | { kind: "журнал" };
+type View =
+  | { kind: "глава"; n: number }
+  | { kind: "дашборд" }
+  | { kind: "журнал" }
+  | { kind: "поиск"; q: string };
+
+export type Notify = (text: string, kind?: "ok" | "err") => void;
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [view, setView] = useState<View | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const [prevJob, setPrevJob] = useState<Job | null>(null);
+  const [query, setQuery] = useState("");
+
+  const notify: Notify = useCallback((text, kind = "err") => {
+    setToast({ text: text.replace(/^Error:\s*/, ""), kind });
+    if (kind === "ok") setTimeout(() => setToast(null), 3500);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -22,15 +34,15 @@ export default function App() {
       }
       setPrevJob(s.job);
     } catch (e) {
-      setError(String(e));
+      notify(String(e));
     }
-  }, [prevJob]);
+  }, [prevJob, notify]);
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 2000);
+    const id = setInterval(refresh, state?.job?.status === "выполняется" ? 1000 : 2500);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [refresh, state?.job?.status]);
 
   useEffect(() => {
     if (!view && state) {
@@ -40,12 +52,11 @@ export default function App() {
   }, [state, view]);
 
   const runCommand = async (cmd: string, chapter?: number) => {
-    setError(null);
     try {
       await apiPost("/api/command", { cmd, chapter });
       refresh();
     } catch (e) {
-      setError(String(e));
+      notify(String(e));
     }
   };
 
@@ -75,6 +86,21 @@ export default function App() {
             Журнал API
           </button>
         </div>
+
+        <form
+          className="sidebtns"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (query.trim()) setView({ kind: "поиск", q: query.trim() });
+          }}
+        >
+          <input
+            className="search"
+            placeholder="Поиск по канону…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </form>
 
         <div className="muted" style={{ margin: "6px 0" }}>Очередь глав</div>
         {state.chapters.map((c) => (
@@ -116,6 +142,7 @@ export default function App() {
           </>
         )}
         {view?.kind === "журнал" && <ApiJournal />}
+        {view?.kind === "поиск" && <SearchView q={view.q} notify={notify} />}
         {view?.kind === "глава" && (
           <ChapterView
             key={view.n}
@@ -123,17 +150,44 @@ export default function App() {
             job={state.job}
             refreshTick={refreshTick}
             runCommand={runCommand}
-            onError={setError}
+            notify={notify}
           />
         )}
       </main>
 
-      {error && (
-        <div className="toast" onClick={() => setError(null)}>
-          {error.replace(/^Error:\s*/, "")}
+      {toast && (
+        <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>
+          {toast.text}
         </div>
       )}
     </div>
+  );
+}
+
+function SearchView({ q, notify }: { q: string; notify: Notify }) {
+  const [groups, setGroups] = useState<Record<string, { ref: string; text: string }[]> | null>(null);
+  useEffect(() => {
+    apiGet<Record<string, { ref: string; text: string }[]>>(`/api/find?q=${encodeURIComponent(q)}`)
+      .then(setGroups)
+      .catch((e) => notify(String(e)));
+  }, [q, notify]);
+  if (!groups) return <p>Поиск «{q}»…</p>;
+  const kinds = Object.keys(groups);
+  return (
+    <>
+      <h1>Поиск: «{q}»</h1>
+      {kinds.length === 0 && <p className="muted">Ничего не найдено.</p>}
+      {kinds.map((kind) => (
+        <div key={kind}>
+          <h2>{kind} ({groups[kind].length})</h2>
+          {groups[kind].map((h, i) => (
+            <div className="editrow" key={i}>
+              <strong>[{h.ref}]</strong> <span>{h.text}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </>
   );
 }
 

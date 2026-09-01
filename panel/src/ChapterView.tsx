@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiGet, apiPost } from "./api";
+import type { Notify } from "./App";
 import type { ChapterDetail, Flag, Job, Resolution } from "./types";
 
 // кнопки такта по состоянию FSM (сценарий А, §3.2)
@@ -26,20 +27,25 @@ const ACTIONS: Record<string, { label: string; cmd: string; primary?: boolean; c
   "зафиксировано": [],
 };
 
+// состояния, где «Продолжить такт» выполняет машинные шаги до паузы автора (FR-O1)
+const MACHINE_STATES = new Set([
+  "не-начато", "собрано", "сгенерировано", "верифицировано-1", "верифицировано-2", "правки",
+]);
+
 export function ChapterView(props: {
   chapter: number;
   job: Job | null;
   refreshTick: number;
   runCommand: (cmd: string, chapter?: number) => Promise<void>;
-  onError: (e: string) => void;
+  notify: Notify;
 }) {
-  const { chapter, job, refreshTick, runCommand, onError } = props;
+  const { chapter, job, refreshTick, runCommand, notify } = props;
   const [d, setD] = useState<ChapterDetail | null>(null);
-  const [tab, setTab] = useState<"чтение" | "правки" | "приёмка" | "история">("чтение");
+  const [tab, setTab] = useState<"чтение" | "правки" | "приёмка" | "ручной" | "история">("чтение");
 
   const load = useCallback(() => {
-    apiGet<ChapterDetail>(`/api/chapter/${chapter}`).then(setD).catch((e) => onError(String(e)));
-  }, [chapter, onError]);
+    apiGet<ChapterDetail>(`/api/chapter/${chapter}`).then(setD).catch((e) => notify(String(e)));
+  }, [chapter, notify]);
 
   useEffect(load, [load, refreshTick]);
 
@@ -61,7 +67,7 @@ export function ChapterView(props: {
       await apiPost(`/api/chapter/${chapter}/accept`);
       load();
     } catch (e) {
-      onError(String(e));
+      notify(String(e));
     }
   };
 
@@ -71,7 +77,7 @@ export function ChapterView(props: {
       await apiPost(`/api/chapter/${chapter}/rollback`, {});
       load();
     } catch (e) {
-      onError(String(e));
+      notify(String(e));
     }
   };
 
@@ -91,6 +97,12 @@ export function ChapterView(props: {
       <div className="muted">Дальше: {d.next}</div>
 
       <div className="actions">
+        {MACHINE_STATES.has(d.state) && (
+          <button className="primary" disabled={busy} onClick={() => runCommand("run", chapter)}
+            title="Выполнить машинные шаги такта до следующей паузы автора (FR-O1)">
+            Продолжить такт ▶
+          </button>
+        )}
         {actions.map((a) => (
           <button key={a.cmd} className={a.primary ? "primary" : ""} disabled={busy} onClick={() => act(a)}>
             {a.label}
@@ -111,16 +123,18 @@ export function ChapterView(props: {
       {job && (job.chapter === chapter || job.chapter == null) && <JobBox job={job} />}
 
       <div className="tabs">
-        {(["чтение", "правки", "приёмка", "история"] as const).map((t) => (
+        {(["чтение", "правки", "приёмка", "ручной", "история"] as const).map((t) => (
           <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-            {t === "чтение" ? "Чтение с флагами" : t === "правки" ? "Правки" : t === "приёмка" ? "Приёмка" : "История"}
+            {t === "чтение" ? "Чтение с флагами" : t === "правки" ? "Правки" : t === "приёмка" ? "Приёмка"
+              : t === "ручной" ? "Окно / ручной режим" : "История"}
           </button>
         ))}
       </div>
 
-      {tab === "чтение" && <Reading d={d} reload={load} onError={onError} />}
-      {tab === "правки" && <Edits d={d} reload={load} onError={onError} />}
-      {tab === "приёмка" && <Acceptance d={d} reload={load} onError={onError} unresolved={unresolved} />}
+      {tab === "чтение" && <Reading d={d} reload={load} notify={notify} />}
+      {tab === "правки" && <Edits d={d} reload={load} notify={notify} />}
+      {tab === "приёмка" && <Acceptance d={d} reload={load} notify={notify} unresolved={unresolved} />}
+      {tab === "ручной" && <ManualTab d={d} reload={load} notify={notify} />}
       {tab === "история" && <History d={d} />}
     </>
   );
@@ -148,7 +162,7 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function Reading({ d, reload, onError }: { d: ChapterDetail; reload: () => void; onError: (e: string) => void }) {
+function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; notify: Notify }) {
   const html = useMemo(() => {
     if (!d.text) return null;
     let h = esc(d.text);
@@ -191,7 +205,7 @@ function Reading({ d, reload, onError }: { d: ChapterDetail; reload: () => void;
       {d.flags.length === 0 && <p className="muted">Флагов нет{d.state === "сгенерировано" || d.state === "собрано" ? " (Э2 ещё не запускался)" : ""}.</p>}
       {d.flags.map((f) => (
         <FlagCard key={f.flag_id} f={f} chapter={d.chapter}
-          resolution={d.resolutions.find((r) => r.flag_id === f.flag_id)} reload={reload} onError={onError} />
+          resolution={d.resolutions.find((r) => r.flag_id === f.flag_id)} reload={reload} notify={notify} />
       ))}
 
       {html ? (
@@ -207,16 +221,16 @@ function Reading({ d, reload, onError }: { d: ChapterDetail; reload: () => void;
 }
 
 function FlagCard(props: {
-  f: Flag; chapter: number; resolution?: Resolution; reload: () => void; onError: (e: string) => void;
+  f: Flag; chapter: number; resolution?: Resolution; reload: () => void; notify: Notify;
 }) {
-  const { f, chapter, resolution, reload, onError } = props;
+  const { f, chapter, resolution, reload, notify } = props;
   const [registry, setRegistry] = useState("3.1");
   const decide = async (decision: string) => {
     try {
       await apiPost(`/api/chapter/${chapter}/resolve`, { flag_id: f.flag_id, decision, registry });
       reload();
     } catch (e) {
-      onError(String(e));
+      notify(String(e));
     }
   };
   const badge = f.kind === "samovolka" ? "самоволка" : f.severity;
@@ -251,7 +265,7 @@ function FlagCard(props: {
 
 // ------------------------------------------------------------------- Правки
 
-function Edits({ d, reload, onError }: { d: ChapterDetail; reload: () => void; onError: (e: string) => void }) {
+function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; notify: Notify }) {
   const [text, setText] = useState(d.edits_md ?? "БЫЛО: \nСТАЛО: \n\nУКАЗАНИЕ: \n");
   const [k1, setK1] = useState<number | null>(null);
   const [k2, setK2] = useState<number | null>(null);
@@ -262,10 +276,10 @@ function Edits({ d, reload, onError }: { d: ChapterDetail; reload: () => void; o
   const save = async () => {
     try {
       const r = await apiPost<{ parsed: number }>(`/api/chapter/${d.chapter}/edits`, { text });
-      onError(`Сохранено: распознано правок — ${r.parsed}`);
+      notify(`Сохранено: распознано правок — ${r.parsed}`, "ok");
       reload();
     } catch (e) {
-      onError(String(e));
+      notify(String(e));
     }
   };
 
@@ -277,7 +291,7 @@ function Edits({ d, reload, onError }: { d: ChapterDetail; reload: () => void; o
       const r = await apiGet<{ lines: string[] }>(`/api/chapter/${d.chapter}/diff/${a}/${b}`);
       setDiff(r.lines);
     } catch (e) {
-      onError(String(e));
+      notify(String(e));
     }
   };
 
@@ -336,18 +350,18 @@ function Edits({ d, reload, onError }: { d: ChapterDetail; reload: () => void; o
 
 // ------------------------------------------------------------------ Приёмка
 
-function Acceptance(props: { d: ChapterDetail; reload: () => void; onError: (e: string) => void; unresolved: number }) {
-  const { d, reload, onError, unresolved } = props;
+function Acceptance(props: { d: ChapterDetail; reload: () => void; notify: Notify; unresolved: number }) {
+  const { d, reload, notify, unresolved } = props;
   const [batch, setBatch] = useState(d.canon_batch ?? "");
   useEffect(() => setBatch(d.canon_batch ?? ""), [d.canon_batch]);
 
   const saveBatch = async () => {
     try {
       await apiPost(`/api/chapter/${d.chapter}/canon-batch`, { text: batch });
-      onError("Пакет сохранён.");
+      notify("Пакет сохранён.", "ok");
       reload();
     } catch (e) {
-      onError(String(e));
+      notify(String(e));
     }
   };
 
@@ -412,6 +426,123 @@ function History({ d }: { d: ChapterDetail }) {
         </tbody>
       </table>
       {d.history.length === 0 && <p className="muted">Переходов ещё не было.</p>}
+    </>
+  );
+}
+
+
+// -------------------------------------------------- Окно контекста и ручной режим
+
+function ManualTab({ d, reload, notify }: { d: ChapterDetail; reload: () => void; notify: Notify }) {
+  const [win, setWin] = useState<{ text: string | null; size_flag: string | null } | null>(null);
+  const [pasted, setPasted] = useState("");
+
+  useEffect(() => {
+    apiGet<{ text: string | null; size_flag: string | null }>(`/api/chapter/${d.chapter}/window`)
+      .then(setWin)
+      .catch(() => setWin({ text: null, size_flag: null }));
+  }, [d.chapter, d.state]);
+
+  const copy = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      notify(`${what} — скопировано в буфер.`, "ok");
+    } catch {
+      notify("Буфер обмена недоступен — выделите текст ниже вручную.");
+    }
+  };
+
+  const copyPrompt = async (kind: "verify2" | "edits", what: string) => {
+    try {
+      const r = await apiGet<{ text: string }>(`/api/chapter/${d.chapter}/prompt/${kind}`);
+      await copy(r.text, what);
+    } catch (e) {
+      notify(String(e));
+    }
+  };
+
+  const sendDraft = async () => {
+    try {
+      const r = await apiPost<{ draft: number }>(`/api/chapter/${d.chapter}/manual-draft`, { text: pasted });
+      notify(`Черновик принят как draft_${r.draft}.`, "ok");
+      setPasted("");
+      reload();
+    } catch (e) {
+      notify(String(e));
+    }
+  };
+
+  const sendFlags = async () => {
+    try {
+      const r = await apiPost<{ flags: number }>(`/api/chapter/${d.chapter}/manual-flags`, { text: pasted });
+      notify(`Принято флагов Э2: ${r.flags}.`, "ok");
+      setPasted("");
+      reload();
+    } catch (e) {
+      notify(String(e));
+    }
+  };
+
+  const needDraft = ["собрано", "сгенерировано", "на-приёмке", "дифф-контроль"].includes(d.state);
+  const needFlags = d.state === "верифицировано-1";
+
+  return (
+    <>
+      <p className="muted">
+        Ручной режим (NFR-3): если API недоступен, скопируйте промпт в чат модели и вставьте её ответ сюда —
+        такт продолжится штатно, FSM и проверки сохраняются.
+      </p>
+
+      {needDraft && (
+        <>
+          <h2>{d.state === "собрано" || d.state === "сгенерировано" ? "Генерация главы вручную" : "Внесение правок вручную"}</h2>
+          <div className="actions">
+            {(d.state === "собрано" || d.state === "сгенерировано") && win?.text && (
+              <button onClick={() => copy(win.text!, "Окно контекста")}>Скопировать окно контекста</button>
+            )}
+            {(d.state === "на-приёмке" || d.state === "дифф-контроль") && (
+              <button onClick={() => copyPrompt("edits", "Промпт правок")}>Скопировать промпт правок</button>
+            )}
+          </div>
+          <textarea placeholder={`Вставьте текст главы — будет сохранён как draft_${d.draft + 1}.md`}
+            value={pasted} onChange={(e) => setPasted(e.target.value)} />
+          <div className="actions">
+            <button className="primary" disabled={!pasted.trim()} onClick={sendDraft}>
+              Принять как draft_{d.draft + 1}
+            </button>
+          </div>
+        </>
+      )}
+
+      {needFlags && (
+        <>
+          <h2>Проверка Э2 вручную</h2>
+          <div className="actions">
+            <button onClick={() => copyPrompt("verify2", "Промпт Верификатора-2")}>
+              Сформировать и скопировать промпт Э2
+            </button>
+          </div>
+          <textarea placeholder="Вставьте JSON-ответ модели (можно вместе с пояснениями — массив будет найден)"
+            value={pasted} onChange={(e) => setPasted(e.target.value)} />
+          <div className="actions">
+            <button className="primary" disabled={!pasted.trim()} onClick={sendFlags}>Принять флаги Э2</button>
+          </div>
+        </>
+      )}
+
+      {!needDraft && !needFlags && (
+        <p className="muted">В состоянии «{d.state}» ручной ввод не требуется.</p>
+      )}
+
+      {win?.size_flag && <div className="card bad">{win.size_flag}</div>}
+      {win?.text ? (
+        <>
+          <h2>Окно контекста (window.md)</h2>
+          <pre className="window">{win.text}</pre>
+        </>
+      ) : (
+        <p className="muted">Окно ещё не собрано.</p>
+      )}
     </>
   );
 }

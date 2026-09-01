@@ -30,22 +30,47 @@ from .schemas import Resolution
 
 # команды такта, доступные из панели (белый список)
 COMMANDS = {
-    "export", "compile", "write", "verify1", "verify2", "review",
+    "run", "export", "compile", "write", "verify1", "verify2", "review",
     "apply-edits", "diff-check", "regress", "canonize", "canonize-apply",
 }
 
 
+class _LiveBuffer(io.TextIOBase):
+    """Пишет вывод задачи сразу в job['output'] — панель видит лог по ходу."""
+
+    def __init__(self, job: dict, lock: threading.Lock):
+        self.job = job
+        self.lock = lock
+
+    def write(self, s: str) -> int:
+        with self.lock:
+            self.job["output"] += _strip_ansi(s)
+        return len(s)
+
+
 class JobRunner:
-    """Одна задача за раз (Д-5: однопользовательский режим, без гонок FSM)."""
+    """Одна задача за раз (Д-5: однопользовательский режим, без гонок FSM).
+
+    redirect_stdout глобален для процесса, поэтому пока задача идёт,
+    другие захватывающие вывод операции (accept/rollback/ручной режим)
+    отклоняются через ensure_idle().
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.job: dict | None = None
 
+    @property
+    def busy(self) -> bool:
+        return bool(self.job and self.job["status"] == "выполняется")
+
+    def ensure_idle(self) -> None:
+        if self.busy:
+            raise RuntimeError(f"дождитесь завершения задачи «{self.job['name']}»")  # type: ignore[index]
+
     def start(self, name: str, chapter: int | None, fn) -> dict:
         with self._lock:
-            if self.job and self.job["status"] == "выполняется":
-                raise RuntimeError(f"уже выполняется: {self.job['name']}")
+            self.ensure_idle()
             self.job = {
                 "name": name,
                 "chapter": chapter,
@@ -57,7 +82,8 @@ class JobRunner:
         return self.job
 
     def _run(self, fn) -> None:
-        buf = io.StringIO()
+        assert self.job is not None
+        buf = _LiveBuffer(self.job, self._lock)
         status = "готово"
         try:
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
@@ -70,8 +96,6 @@ class JobRunner:
         except Exception as e:  # показываем автору, не роняем сервер
             buf.write(f"\nОШИБКА: {e}")
             status = "ошибка"
-        assert self.job is not None
-        self.job["output"] = _strip_ansi(buf.getvalue())
         self.job["status"] = status
         self.job["finished"] = datetime.now(timezone.utc).isoformat()
 
@@ -189,6 +213,43 @@ class PanelAPI:
 
         return read_log(self.ws.logs)[-n:]
 
+    def window(self, n: int) -> dict:
+        """Окно контекста главы + флаг превышения лимита (FR-C5)."""
+        path = self.ws.window_path(n)
+        flag = self.ws.chapter_dir(n) / "window_size_флаг.md"
+        return {
+            "text": path.read_text(encoding="utf-8") if path.exists() else None,
+            "size_flag": flag.read_text(encoding="utf-8") if flag.exists() else None,
+        }
+
+    def prompt(self, n: int, kind: str) -> dict:
+        """Промпт для ручного прогона (NFR-3): verify2 строится по требованию."""
+        if kind == "verify2":
+            from . import guard
+
+            system, user = verifier2.build_prompt(self.ws, n, ChapterState(self.ws, n).draft)
+            text = f"<!-- system -->\n{system}\n\n<!-- user -->\n{user}\n"
+            guard.write_text(self.ws.chapter_dir(n) / "verify2_prompt.md", text)
+            return {"text": text, "target": "flags.json"}
+        if kind == "edits":
+            p = self.ws.chapter_dir(n) / "apply_edits_prompt.md"
+            if not p.exists():
+                # промпт правок собирается из текущих правок и черновика
+                from . import writer
+
+                edits = review.load_edits(self.ws, n)
+                text = writer.edit_prompt(self.ws, n, ChapterState(self.ws, n).draft, edits)
+            else:
+                text = p.read_text(encoding="utf-8")
+            return {"text": text, "target": f"draft_{ChapterState(self.ws, n).draft + 1}.md"}
+        raise ValueError(f"неизвестный промпт: {kind}")
+
+    def find(self, query: str) -> dict:
+        from . import search
+
+        groups = search.grouped(search.find(self.ws.exports, self.library, query))
+        return {k: [{"ref": h.ref, "text": h.text} for h in v] for k, v in groups.items()}
+
     # ---------------------------------------------------------- изменения
 
     def save_edits(self, n: int, text: str) -> dict:
@@ -216,8 +277,54 @@ class PanelAPI:
         guard.write_text(self.ws.chapter_dir(n) / "canon_batch.md", text)
         return {"ok": True}
 
+    def manual_draft(self, n: int, text: str) -> dict:
+        """Ручной режим (NFR-3): вставленный ответ Писателя → следующий черновик.
+
+        По состоянию FSM выбирается регистрация: генерация (write --manual)
+        или внесение правок (apply-edits --manual).
+        """
+        self.jobs.ensure_idle()
+        if not text.strip():
+            raise ValueError("пустой текст черновика")
+        from . import guard
+        from .cli import cmd_apply_edits, cmd_write
+
+        st = ChapterState(self.ws, n)
+        k = st.draft + 1
+        guard.write_text(self.ws.draft_path(n, k), text)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                if st.state in ("собрано", "сгенерировано"):
+                    cmd_write(n, manual=True)
+                elif st.state in ("на-приёмке", "дифф-контроль"):
+                    cmd_apply_edits(n, manual=True)
+                else:
+                    raise ValueError(f"из состояния «{st.state}» черновик руками не принимается")
+        except typer.Exit as e:
+            if getattr(e, "exit_code", 1):
+                raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or "черновик не принят")
+        return {"ok": True, "draft": k, "output": _strip_ansi(buf.getvalue())}
+
+    def manual_flags(self, n: int, text: str) -> dict:
+        """Ручной режим Э2: вставленный ответ Верификатора-2 → flags.json + verify2 --manual."""
+        self.jobs.ensure_idle()
+        from .cli import cmd_verify2
+
+        flags = verifier2.parse_flags(text)  # понимает JSON в прозе/```-блоке
+        verifier2.save_flags(self.ws, n, flags)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                cmd_verify2(n, manual=True)
+        except typer.Exit as e:
+            if getattr(e, "exit_code", 1):
+                raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or "флаги не приняты")
+        return {"ok": True, "flags": len(flags)}
+
     def accept(self, n: int) -> dict:
         """Приёмка: подтверждение автор дал кнопкой + диалогом в панели (Д-8)."""
+        self.jobs.ensure_idle()
         from .cli import cmd_accept
 
         buf = io.StringIO()
@@ -230,6 +337,7 @@ class PanelAPI:
         return {"ok": True, "output": _strip_ansi(buf.getvalue())}
 
     def rollback(self, n: int, to: str | None) -> dict:
+        self.jobs.ensure_idle()
         from .cli import cmd_rollback
 
         buf = io.StringIO()
@@ -248,9 +356,10 @@ class PanelAPI:
         from . import cli
 
         fns = {
+            "run": lambda: cli.cmd_run(chapter),  # машинные шаги до паузы автора (FR-O1)
             "export": lambda: cli.cmd_export(),
             "compile": lambda: cli.cmd_compile(chapter),
-            "write": lambda: cli.cmd_write(chapter),
+            "write": lambda: cli.cmd_write(chapter, manual=False),
             "verify1": lambda: cli.cmd_verify1(chapter),
             "verify2": lambda: cli.cmd_verify2(chapter, manual=False),
             "review": lambda: cli.cmd_review(chapter),
@@ -314,6 +423,17 @@ def make_handler(api: PanelAPI):
                 m = re.fullmatch(r"/api/chapter/(\d+)/diff/(\d+)/(\d+)", path)
                 if m:
                     return self._json(api.diff(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+                m = re.fullmatch(r"/api/chapter/(\d+)/window", path)
+                if m:
+                    return self._json(api.window(int(m.group(1))))
+                m = re.fullmatch(r"/api/chapter/(\d+)/prompt/(\w+)", path)
+                if m:
+                    return self._json(api.prompt(int(m.group(1)), m.group(2)))
+                if path == "/api/find":
+                    from urllib.parse import parse_qs, urlparse
+
+                    q = parse_qs(urlparse(self.path).query).get("q", [""])[0]
+                    return self._json(api.find(q))
                 if path == "/api/log":
                     return self._json(api.api_log())
                 if path == "/api/job":
@@ -363,6 +483,12 @@ def make_handler(api: PanelAPI):
                 m = re.fullmatch(r"/api/chapter/(\d+)/canon-batch", path)
                 if m:
                     return self._json(api.save_canon_batch(int(m.group(1)), body.get("text", "")))
+                m = re.fullmatch(r"/api/chapter/(\d+)/manual-draft", path)
+                if m:
+                    return self._json(api.manual_draft(int(m.group(1)), body.get("text", "")))
+                m = re.fullmatch(r"/api/chapter/(\d+)/manual-flags", path)
+                if m:
+                    return self._json(api.manual_flags(int(m.group(1)), body.get("text", "")))
                 m = re.fullmatch(r"/api/chapter/(\d+)/accept", path)
                 if m:
                     return self._json(api.accept(int(m.group(1))))

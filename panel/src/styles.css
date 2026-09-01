@@ -86,3 +86,9 @@ th { background: var(--surface-2); }
 iframe.dash { width: 100%; height: calc(100vh - 120px); border: 1px solid var(--line); border-radius: 8px; }
 .toast { position: fixed; bottom: 18px; right: 18px; background: var(--crit); color: #fff;
          padding: 10px 16px; border-radius: 9px; max-width: 440px; z-index: 10; }
+
+.toast.ok { background: var(--good); }
+input.search { width: 100%; font: inherit; background: var(--surface); color: var(--ink);
+               border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; }
+pre.window { border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 12px;
+             white-space: pre-wrap; max-height: 420px; overflow-y: auto; color: var(--ink-2); }
