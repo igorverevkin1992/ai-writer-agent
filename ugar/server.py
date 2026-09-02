@@ -31,7 +31,7 @@ from .schemas import Resolution
 # команды такта, доступные из панели (белый список)
 COMMANDS = {
     "run", "export", "compile", "write", "verify1", "verify2", "review",
-    "apply-edits", "diff-check", "regress", "canonize", "canonize-apply",
+    "apply-edits", "diff-check", "regress", "canonize", "canonize-apply", "story-circles",
 }
 
 
@@ -349,13 +349,41 @@ class PanelAPI:
                 raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or "откат отклонён")
         return {"ok": True, "output": _strip_ansi(buf.getvalue())}
 
-    def run_command(self, cmd: str, chapter: int | None) -> dict:
+    def circles(self) -> dict:
+        from . import circles as circles_mod
+
+        prompts_dir = self.ws.root / "круги_истории" / "промпты"
+        try:
+            parts = exporter.load_parts(self.ws.exports)
+        except FileNotFoundError:
+            parts = []
+        return {
+            "circles": circles_mod.list_circles(self.ws),
+            "parts": parts,
+            "prompts": sorted(p.name for p in prompts_dir.glob("*.md")) if prompts_dir.exists() else [],
+        }
+
+    def circle_prompt(self, stem: str) -> dict:
+        path = self.ws.root / "круги_истории" / "промпты" / f"{stem}.md"
+        return {"text": path.read_text(encoding="utf-8")}
+
+    def manual_circle(self, scope: str, key: int | None, text: str) -> dict:
+        from . import circles as circles_mod
+
+        path = circles_mod.accept_manual(self.ws, scope, key, text)
+        return {"ok": True, "path": str(path)}
+
+    def run_command(self, cmd: str, chapter: int | None, params: dict | None = None) -> dict:
         """Долгие шаги такта — фоновой задачей с захватом вывода."""
         if cmd not in COMMANDS:
             raise ValueError(f"неизвестная команда: {cmd}")
         from . import cli
 
+        params = params or {}
         fns = {
+            "story-circles": lambda: cli.cmd_circles(
+                params.get("scope", "всё"), chapter=params.get("chapter"), redo=bool(params.get("redo"))
+            ),
             "run": lambda: cli.cmd_run(chapter),  # машинные шаги до паузы автора (FR-O1)
             "export": lambda: cli.cmd_export(),
             "compile": lambda: cli.cmd_compile(chapter),
@@ -434,6 +462,11 @@ def make_handler(api: PanelAPI):
 
                     q = parse_qs(urlparse(self.path).query).get("q", [""])[0]
                     return self._json(api.find(q))
+                if path == "/api/circles":
+                    return self._json(api.circles())
+                m = re.fullmatch(r"/api/circles/prompt/([\w\-]+)", path)
+                if m:
+                    return self._json(api.circle_prompt(m.group(1)))
                 if path == "/api/log":
                     return self._json(api.api_log())
                 if path == "/api/job":
@@ -470,7 +503,7 @@ def make_handler(api: PanelAPI):
                 body = self._body()
                 path = self.path.split("?")[0]
                 if path == "/api/command":
-                    job = api.run_command(body.get("cmd", ""), body.get("chapter"))
+                    job = api.run_command(body.get("cmd", ""), body.get("chapter"), body.get("params"))
                     return self._json({"job": job})
                 m = re.fullmatch(r"/api/chapter/(\d+)/edits", path)
                 if m:
@@ -483,6 +516,8 @@ def make_handler(api: PanelAPI):
                 m = re.fullmatch(r"/api/chapter/(\d+)/canon-batch", path)
                 if m:
                     return self._json(api.save_canon_batch(int(m.group(1)), body.get("text", "")))
+                if path == "/api/circles/manual":
+                    return self._json(api.manual_circle(body.get("scope", ""), body.get("key"), body.get("text", "")))
                 m = re.fullmatch(r"/api/chapter/(\d+)/manual-draft", path)
                 if m:
                     return self._json(api.manual_draft(int(m.group(1)), body.get("text", "")))

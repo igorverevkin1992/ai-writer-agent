@@ -70,6 +70,10 @@ def parse_norms_prose(path: Path) -> dict[str, Norm] | None:
         raise MarkupError(path, 1, "не найдена норма TTR")
     norms["ttr_мин"] = Norm(min=float(m.group(1).replace(",", ".")), unit="доля", source=src)
     norms["ttr_окно_слов"] = Norm(min=float(m.group(2)) * 1000, max=float(m.group(2)) * 1000, unit="слов", source=src)
+
+    m = re.search(r"объём главы\s*[—-]+\s*(\d+)\s*[–-]\s*(\d+)\s*слов", text)
+    if m:  # необязательная норма (Р-019)
+        norms["объём_главы"] = Norm(min=float(m.group(1)), max=float(m.group(2)), unit="слов", source=src)
     return norms
 
 
@@ -435,3 +439,63 @@ def parse_dossiers_real(paths: list[Path], known_names: set[str]) -> list[Dossie
                 )
             )
     return dossiers
+
+
+# ------------------------------------------------------------- части тома
+
+
+PART_RE = re.compile(r"###\s*ЧАСТЬ\s+([IVX\d]+)\.\s*«([^»]+)»\s*[—-]+\s*(.*?)\s*\(гл\.\s*(\d+)\s*[–-]\s*(\d+)\)")
+ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10}
+
+
+def parse_parts(path: Path) -> list[dict]:
+    """Части тома из заголовков реестра: «### ЧАСТЬ I. «МОКРОЕ ДЕЛО» — апрель 1926 (гл. 1–9)»."""
+    parts = []
+    for m in PART_RE.finditer(path.read_text(encoding="utf-8")):
+        num = m.group(1)
+        parts.append(
+            {
+                "part": ROMAN.get(num, int(num) if num.isdigit() else len(parts) + 1),
+                "title": m.group(2),
+                "period": m.group(3),
+                "from_chapter": int(m.group(4)),
+                "to_chapter": int(m.group(5)),
+            }
+        )
+    return parts
+
+
+# ------------------------------------------- закладки из контроля поглавника
+
+
+def parse_poglavnik_plants(path: Path, volume: int, existing: list[Plant]) -> list[Plant]:
+    """Строка «Закладки положены: знак/зола (6.2), часы (гл. 4), …» → закладки глав,
+    которых нет в реестре §7 (дедупликация по главе и первому слову)."""
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r"Закладки положены:\s*(.+)", text)
+    if not m:
+        return []
+    new: list[Plant] = []
+    for i, item in enumerate(re.split(r",\s*(?![^(]*\))", m.group(1).rstrip(". ")), start=1):
+        loc = re.search(r"\(([^)]*)\)", item)
+        name = re.sub(r"\(.*?\)", "", item).strip()
+        if not loc or not name:
+            continue
+        ch_m = re.search(r"(\d+)", loc.group(1))
+        if not ch_m:
+            continue
+        chapter = int(ch_m.group(1))
+        stem = re.split(r"[\s/]", name.lower())[0][:4]
+        if any(chapter in p.chapters and stem in p.what.lower() for p in existing + new):
+            continue
+        new.append(
+            Plant(
+                plant_id=f"П-{i:02d}",
+                what=f"{name} (по контролю поглавника)",
+                placed={"vol": volume, "ch": chapter},
+                chapters=[chapter],
+                fires=[],
+                status="🔧",
+            )
+        )
+    return new

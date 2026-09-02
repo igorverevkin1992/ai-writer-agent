@@ -697,6 +697,30 @@ def cmd_find(query: str) -> None:
             typer.echo(f"  [{h.ref}] {h.text}")
 
 
+@app.command("circles", rich_help_panel="Качество и регрессия")
+@_friendly
+def cmd_circles(
+    scope: str = typer.Argument("всё", help="книга | части | главы | всё"),
+    chapter: int | None = typer.Option(None, "--глава", "--chapter", help="Только одна глава (для охвата «главы»)."),
+    redo: bool = typer.Option(False, "--заново", "--redo", help="Пересчитать уже существующие круги."),
+) -> None:
+    """Круги истории (8 шагов) для книги, частей и глав — черновики в круги_истории/."""
+    from . import circles as circles_mod
+
+    ws, cfg, lib = _ctx()
+    exporter.run_export(lib, ws.exports, ws.logs)
+    result = circles_mod.run(ws, cfg, scope, chapter, only_missing=not redo)
+    for path in result["готово"]:
+        typer.secho(f"  ✓ {path}", fg=typer.colors.GREEN)
+    if result["ручной_режим"]:
+        typer.secho(f"⚠ {result['ручной_режим']}", fg=typer.colors.YELLOW)
+        typer.echo(f"Промпты для ручного прогона ({len(result['промпты'])}): круги_истории/промпты/ — "
+                   "ответ модели вставьте в панели («Круги истории») или сохраните JSON рядом.")
+        raise typer.Exit(code=2)
+    if not result["готово"]:
+        typer.echo("Все круги уже есть — `--заново` для пересчёта.")
+
+
 @app.command("snapshot", rich_help_panel="Канон и бэкап")
 @_friendly
 def cmd_snapshot(volume: int = typer.Argument(1, help="Номер тома.")) -> None:

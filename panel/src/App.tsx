@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "./api";
 import { ChapterView } from "./ChapterView";
+import { Circles } from "./Circles";
 import type { ApiLogRow, AppState, Job } from "./types";
 
 type View =
   | { kind: "глава"; n: number }
   | { kind: "дашборд" }
   | { kind: "журнал" }
+  | { kind: "круги" }
   | { kind: "поиск"; q: string };
 
 export type Notify = (text: string, kind?: "ok" | "err") => void;
@@ -51,9 +53,9 @@ export default function App() {
     }
   }, [state, view]);
 
-  const runCommand = async (cmd: string, chapter?: number) => {
+  const runCommand = async (cmd: string, chapter?: number, params?: Record<string, unknown>) => {
     try {
-      await apiPost("/api/command", { cmd, chapter });
+      await apiPost("/api/command", { cmd, chapter, params });
       refresh();
     } catch (e) {
       notify(String(e));
@@ -84,6 +86,9 @@ export default function App() {
           </button>
           <button className={view?.kind === "журнал" ? "primary" : ""} onClick={() => setView({ kind: "журнал" })}>
             Журнал API
+          </button>
+          <button className={view?.kind === "круги" ? "primary" : ""} onClick={() => setView({ kind: "круги" })}>
+            Круги истории
           </button>
         </div>
 
@@ -142,6 +147,7 @@ export default function App() {
           </>
         )}
         {view?.kind === "журнал" && <ApiJournal />}
+        {view?.kind === "круги" && <Circles busy={busy} runCommand={runCommand} notify={notify} refreshTick={refreshTick} />}
         {view?.kind === "поиск" && <SearchView q={view.q} notify={notify} />}
         {view?.kind === "глава" && (
           <ChapterView

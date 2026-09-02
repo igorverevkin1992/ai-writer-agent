@@ -29,6 +29,7 @@ WINDOW_NORM_IDS = [
     "длинная_фраза_порог",
     "был_на_250",
     "усилители_на_1000",
+    "объём_главы",
 ]
 
 
@@ -171,6 +172,7 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
         plants=chapter_plants(exports_dir, brief),
         bans=bans,
         intensifiers=intensifiers,
+        volume_norm=norms.get("объём_главы"),
     )
 
     path = ws.window_path(chapter)

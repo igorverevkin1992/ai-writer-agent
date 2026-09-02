@@ -71,6 +71,9 @@ def test_матрица_закладки_тайны_досье(real):
     plants = exporter.load_plants(real.exports)
     zola = next(p for p in plants if "золе" in p.what)
     assert zola.chapters == [6] and {"vol": 6} in zola.fires
+    ch4 = {p.what.split(" (")[0] for p in plants if 4 in p.chapters}
+    assert ch4 == {"часы", "почтовый канал"}                 # из «Закладки положены» поглавника
+    assert not any("картотека" in p.what and p.plant_id.startswith("П-") for p in plants)  # дедуп с §7
 
     bans = exporter.load_infobans(real.exports)
     assert len(bans) == 10 and all(b.secret for b in bans)
@@ -105,7 +108,7 @@ def test_окно_главы_5_эквивалентно_эталону(real):
     assert len(w) < 80_000
     # детерминизм на реальных данных
     assert compiler.compile_window(real, LIBRARY, 5)[0].read_text(encoding="utf-8") == w
-    assert "550" in etalon  # эталон задаёт объём; в каноне объёма нет — бриф говорит «по сценам»
+    assert "550" in etalon and "700–800 слов" in w  # объём: эталон 550–800, канон Р-019 700–800
 
 
 def test_калибровка_реального_макета(real):
@@ -133,4 +136,5 @@ def test_э1_по_принятой_главе_5(real):
     assert by_id["V1.4_усилители"].status == "FLAG"            # «предельно ясно» и др.
     assert by_id["V1.5_стоп_лексика"].status == "PASS"
     assert by_id["V1.6_утечка_окна"].status == "PASS"
-    assert "V1.2e_объём" not in by_id                          # объёма в каноне нет — проверка пропущена
+    assert by_id["V1.2e_объём"].status == "PASS"               # 752 слова в коридоре 700–800 (Р-019)
+    assert "700" in by_id["V1.2e_объём"].threshold

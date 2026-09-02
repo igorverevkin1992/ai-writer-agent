@@ -185,7 +185,10 @@ def analyze(
             longest = max(zip(lengths, [s for s in sentences if textutils.words(s)]))
             add("V1.2d_максимум_длины", "максимум_длины", longest[0], quotes=[longest[1]])
 
-    if brief.volume_words and "объём_допуск" in norms:
+    if not brief.volume_words and "объём_главы" in norms:
+        # норма объёма из канона (Р-019): коридор мин–макс, выход — флаг
+        add("V1.2e_объём", "объём_главы", n_words)
+    elif brief.volume_words and "объём_допуск" in norms:
         deviation = abs(n_words - brief.volume_words) / brief.volume_words
         tolerance = _norm_value(norms, "объём_допуск")
         checks.append(

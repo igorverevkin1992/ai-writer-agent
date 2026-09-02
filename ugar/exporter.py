@@ -235,7 +235,11 @@ def export_plants(library: Path) -> list[Plant]:
     if not sorted(library.glob("32_*.md")):
         reg = _registry(library)
         if reg is not None:
-            return realcanon.parse_plants_registry(reg)  # §7 «Реестр дальних закладок»
+            plants = realcanon.parse_plants_registry(reg)  # §7 «Реестр дальних закладок»
+            _, volume = realcanon.registry_year_volume(reg)
+            for p23 in sorted(library.glob("23_*.md")):
+                plants.extend(realcanon.parse_poglavnik_plants(p23, volume, plants))
+            return plants
     path = _find_file(library, "32_*.md")
     t = mdparse.require_table(path, ["plant_id", "что", "положена"])
     plants = []
@@ -395,6 +399,16 @@ def find_corpus_file(corpus_dir: Path, chapter: int, volume: int | None = None) 
     return None
 
 
+def export_parts(library: Path) -> list[dict]:
+    """Части (акты) тома — из заголовков реестра информрежима; в демо — пусто."""
+    reg = _registry(library)
+    return realcanon.parse_parts(reg) if reg is not None else []
+
+
+def load_parts(exports_dir: Path) -> list[dict]:
+    return load_export(exports_dir, "parts.json")
+
+
 def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
     """corpus/ — принятые главы в нормализованном виде (для n-грамм и TTR)."""
     corpus_dir = exports_dir / "corpus"
@@ -433,6 +447,7 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, st
         "briefs.json": export_briefs(library),
         "dossiers.json": export_dossiers(library),
         "infobans.json": export_infobans(library),
+        "parts.json": export_parts(library),
     }
     hashes: dict[str, str] = {}
     for name, data in parsed.items():

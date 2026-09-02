@@ -92,3 +92,6 @@ input.search { width: 100%; font: inherit; background: var(--surface); color: va
                border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; }
 pre.window { border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 12px;
              white-space: pre-wrap; max-height: 420px; overflow-y: auto; color: var(--ink-2); }
+
+ol.circle { padding-left: 22px; margin: 8px 0 0; }
+ol.circle li { margin: 6px 0; }

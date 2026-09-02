@@ -74,7 +74,7 @@
 
 - Дата действия: {{ brief.date }}
 - Фокал: {{ brief.focal }}
-- Объём: {% if brief.volume_words %}{{ brief.volume_words }} слов{% else %}по сценам{% endif %}
+- Объём: {% if brief.volume_words %}{{ brief.volume_words }} слов{% elif volume_norm %}{{ volume_norm.min | int }}–{{ volume_norm.max | int }} слов{% else %}по сценам{% endif %}
 
 ### Сцены
 {% for s in brief.scenes -%}
