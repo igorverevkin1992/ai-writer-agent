@@ -29,7 +29,7 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
   = рабочая область (`config.yaml` в корне). Тесты на неё — `tests/test_real_canon.py`.
 - `ugar/verifier1.py` — проверки Э1; пороги ТОЛЬКО из norms.json (критерий 6),
   констант в коде быть не должно.
-- `ugar/verifier2.py`, `ugar/canonist.py` — LLM-роли; JSON из ответов — через
+- `ugar/verifier2.py`, `ugar/canonist.py`, `ugar/circles.py` (круги истории) — LLM-роли; JSON из ответов — через
   `ugar/llmjson.py`; деградация без API обязана сохраняться.
 - `ugar/server.py` — локальный сервер панели (только 127.0.0.1); вызывает
   функции cli, POST защищён заголовком `X-Ugar-Panel`; одна фоновая задача
