@@ -55,3 +55,6 @@ dashboard.html
 
 # панель (этап 3)
 panel/node_modules/
+
+# локальное окружение
+.venv/
