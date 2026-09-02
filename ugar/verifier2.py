@@ -37,7 +37,7 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
     plants = compiler.chapter_plants(exports_dir, brief)
     text = ws.draft_path(chapter, draft).read_text(encoding="utf-8")
     try:
-        drama = circles.frame_for_chapter(exporter.load_circles(exports_dir), exporter.load_parts(exports_dir), chapter)
+        drama = circles.frame_for_chapter(exporter.load_circles(exports_dir), exporter.load_acts(exports_dir), chapter)
     except FileNotFoundError:
         drama = circles.frame_for_chapter([], [], chapter)
     drama_lines = circles.frame_lines(drama, with_weak_spot=True) or [

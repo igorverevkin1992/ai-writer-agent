@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import mdparse
 from .mdparse import MarkupError, cell
-from .schemas import Brief, CircleStep, ContinuityEvent, Dossier, InfoBan, MatrixFact, Norm, Plant, StopRule, StoryCircle
+from .schemas import Act, Brief, CircleStep, ContinuityEvent, Dossier, InfoBan, MatrixFact, Norm, Plant, StopRule, StoryCircle
 
 CH_RE = re.compile(r"[Гг]л\.?\s*(\d+)")
 VOL_RE = re.compile(r"[Тт]ом\w*\s*(\d+)|т\.?\s*(\d+)")
@@ -503,7 +503,7 @@ def parse_poglavnik_plants(path: Path, volume: int, existing: list[Plant]) -> li
 
 # ------------------------------------------------ круги истории (2.1, Р-020)
 
-CIRCLE_HEAD_RE = re.compile(r"^##\s*Круг\s+(тома|части\s+([IVX\d]+)|главы\s+(\d+))\b(.*)$", re.MULTILINE)
+CIRCLE_HEAD_RE = re.compile(r"^##\s*Круг\s+(тома|акта\s+([IVX\d]+)|главы\s+(\d+))\b(.*)$", re.MULTILINE)
 CIRCLE_STEP_RE = re.compile(r"^(\d)\.\s+\*\*(.+?)\*\*\s*(?:\(([^)]*)\))?\s*(?:[—–-]+\s*)?(.*)$")
 _CH_RANGE_RE = re.compile(r"гл\.?\s*([\d\s,–\-]+)")
 
@@ -520,7 +520,7 @@ def chapter_range(text: str) -> tuple[int | None, int | None]:
 
 
 def parse_circles(path: Path) -> list[StoryCircle]:
-    """Документ 21_Круги_истории: «## Круг тома» / «## Круг части I …» / «## Круг главы 5»,
+    """Документ 21_Круги_истории: «## Круг тома» / «## Круг акта 3 …» / «## Круг главы 5»,
     внутри — «**Суть:**», нумерованные шаги «1. **Ты** (гл. 1–3) — …», «**Слабое место:**»."""
     text = path.read_text(encoding="utf-8")
     heads = list(CIRCLE_HEAD_RE.finditer(text))
@@ -530,11 +530,11 @@ def parse_circles(path: Path) -> list[StoryCircle]:
         kind = h.group(1)
         if kind == "тома":
             scope, key, title = "книга", None, "Книга (том целиком)"
-        elif kind.startswith("части"):
+        elif kind.startswith("акта"):
             num = h.group(2)
             key = ROMAN.get(num, int(num) if num.isdigit() else 0)
             tm = re.search(r"«([^»]+)»", h.group(4) or "")
-            scope, title = "часть", f"Часть {key}" + (f" «{tm.group(1)}»" if tm else "")
+            scope, title = "акт", f"Акт {key}" + (f" «{tm.group(1)}»" if tm else "")
         else:
             scope, key = "глава", int(h.group(3))
             title = f"Глава {key}"
@@ -560,3 +560,21 @@ def parse_circles(path: Path) -> list[StoryCircle]:
         if circle.steps:
             circles.append(circle)
     return circles
+
+
+def parse_acts(path: Path) -> list[Act]:
+    """Таблица «Акты тома» документа 2.1 (Р-021): | Акт | Название | Главы | Части | Шаги круга |."""
+    acts: list[Act] = []
+    for table in mdparse.parse_tables(path):
+        if "Акт" not in table.headers or "Главы" not in table.headers:
+            continue
+        for row in table.rows:
+            nums = [int(x) for x in re.findall(r"\d+", row["Главы"])]
+            if not nums or not row["Акт"].strip().isdigit():
+                continue
+            acts.append(Act(
+                act=int(row["Акт"]), title=row.get("Название", "").strip("«» "),
+                from_chapter=min(nums), to_chapter=max(nums),
+                parts=row.get("Части", "").strip(), steps=row.get("Шаги круга", "").strip(),
+            ))
+    return sorted(acts, key=lambda a: a.act)

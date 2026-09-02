@@ -30,28 +30,37 @@ def real(tmp_path):
     return ws
 
 
-def test_части_тома_и_охваты(real):
+def test_акты_тома_и_охваты(real):
     parts = exporter.load_parts(real.exports)
     assert [(p["part"], p["from_chapter"], p["to_chapter"]) for p in parts] == [
         (1, 1, 9), (2, 10, 18), (3, 19, 26), (4, 27, 36), (5, 37, 46)
     ]
-    assert len(circles.targets(real, "всё")) == 1 + 5 + 46
+    acts = exporter.load_acts(real.exports)
+    assert [(a.act, a.from_chapter, a.to_chapter) for a in acts] == [(1, 1, 9), (2, 10, 18), (3, 19, 36), (4, 37, 46)]
+    assert acts[2].parts == "III–IV" and "Обретение" in acts[2].steps
+    assert len(circles.targets(real, "всё")) == 1 + 4 + 46
+    assert circles.targets(real, "части") == circles.targets(real, "акты")  # старое имя охвата — синоним
     assert circles.targets(real, "главы", chapter=5) == [("глава", 5)]
+    frame = circles.frame_for_chapter([], acts, 20)
+    assert frame["act"].act == 3 and frame["act"].title == "ТРАУР · КОММЕРСАНТ"
 
 
 def test_материалы_не_раскрывают_лишнего(real):
     title, book = circles.build_material(real, "книга")
     assert "МОКРОЕ ДЕЛО" in book and "гл. 46" in book and "Реестр тайн" in book
-    title, part = circles.build_material(real, "часть", 1)
-    assert "Часть 1" in title and "гл. 9" in part and "гл. 10" not in part
+    assert "## Акты тома" in book and "Акт 3 «ТРАУР · КОММЕРСАНТ» — гл. 19–36" in book
+    title, act = circles.build_material(real, "акт", 1)
+    assert "Акт 1" in title and "гл. 9" in act and "гл. 10" not in act and "Шаги круга тома" in act
+    title, act3 = circles.build_material(real, "акт", 3)
+    assert "гл. 19" in act3 and "гл. 36" in act3 and "гл. 37" not in act3
     title, ch = circles.build_material(real, "глава", 5)
     assert "обыск стола" in ch and "М-04" in ch and "М-06" not in ch  # знание фокала, не тайны
 
 
 def test_без_api_сохраняются_промпты(real):
-    result = circles.run(real, Config(), "части")
-    assert result["ручной_режим"] and len(result["промпты"]) == 5 and not result["готово"]
-    assert (real.root / "круги_истории" / "промпты" / "часть_1.md").exists()
+    result = circles.run(real, Config(), "акты")
+    assert result["ручной_режим"] and len(result["промпты"]) == 4 and not result["готово"]
+    assert (real.root / "круги_истории" / "промпты" / "акт_1.md").exists()
 
 
 def test_генерация_через_подменённый_адаптер(real, monkeypatch):
@@ -85,7 +94,7 @@ def test_ручной_приём_и_панель(real, monkeypatch):
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/circles", timeout=5) as r:
             data = json.loads(r.read().decode())
-        assert data["parts"][0]["title"] == "МОКРОЕ ДЕЛО"
+        assert data["parts"][0]["title"] == "МОКРОЕ ДЕЛО" and len(data["acts"]) == 4
         assert data["circles"][0]["key"] == 5
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/command", method="POST",

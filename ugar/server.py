@@ -362,6 +362,7 @@ class PanelAPI:
             "circles": circles_mod.list_circles(self.ws),
             "canon_status": circles_mod.canon_status(self.ws),
             "in_canon": len(circles_mod.canon_circles(self.ws)),
+            "acts": [a.model_dump() for a in circles_mod.act_list(self.ws)],
             "parts": parts,
             "prompts": sorted(p.name for p in prompts_dir.glob("*.md")) if prompts_dir.exists() else [],
         }

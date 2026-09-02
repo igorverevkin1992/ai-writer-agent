@@ -5,19 +5,21 @@ import type { Notify } from "./App";
 interface Step { n: number; name: string; text: string; chapters?: string }
 interface Circle { scope: string; key: number | null; title: string; steps: Step[]; weak_spot?: string; summary?: string; generated?: string }
 interface Part { part: number; title: string; from_chapter: number; to_chapter: number }
+interface Act { act: number; title: string; from_chapter: number; to_chapter: number; parts: string; steps: string }
 interface CirclesData {
   circles: Circle[];
   parts: Part[];
+  acts: Act[];
   prompts: string[];
   canon_status: Record<string, string>;
   in_canon: number;
 }
 
-const SCOPE_LABEL: Record<string, string> = { книга: "Книга", часть: "Части", глава: "Главы" };
+const SCOPE_LABEL: Record<string, string> = { книга: "Книга", акт: "Акты", глава: "Главы" };
 
 function stemOf(c: Circle): string {
   if (c.scope === "книга") return "книга";
-  if (c.scope === "часть") return `часть_${c.key}`;
+  if (c.scope === "акт") return `акт_${c.key}`;
   return `глава_${String(c.key ?? 0).padStart(2, "0")}`;
 }
 
@@ -40,8 +42,9 @@ export function Circles(props: {
 
   if (!data) return <p>Загрузка…</p>;
 
+  const nActs = data.acts.length;
   const generate = async (scope: string, redo = false) => {
-    const count = scope === "книга" ? 1 : scope === "части" ? data.parts.length : scope === "главы" ? 46 : 1 + data.parts.length + 46;
+    const count = scope === "книга" ? 1 : scope === "акты" ? nActs : scope === "главы" ? 46 : 1 + nActs + 46;
     if (!window.confirm(`Построить круги истории: ${scope} (${count} вызов(ов) модели${redo ? ", с пересчётом" : ""})?`)) return;
     await runCommand("story-circles", undefined, { scope, redo });
   };
@@ -68,8 +71,8 @@ export function Circles(props: {
   };
 
   const acceptManual = async () => {
-    const m = manualStem.match(/^(книга|часть|глава)_?(\d+)?$/);
-    if (!m) return notify("Выберите промпт (книга / часть_N / глава_NN).");
+    const m = manualStem.match(/^(книга|акт|глава)_?(\d+)?$/);
+    if (!m) return notify("Выберите промпт (книга / акт_N / глава_NN).");
     try {
       await apiPost("/api/circles/manual", { scope: m[1], key: m[2] ? +m[2] : null, text: pasted });
       notify("Круг принят.", "ok");
@@ -80,22 +83,34 @@ export function Circles(props: {
     }
   };
 
-  const groups = ["книга", "часть", "глава"].map((s) => ({ scope: s, items: data.circles.filter((c) => c.scope === s) }));
+  const groups = ["книга", "акт", "глава"].map((s) => ({ scope: s, items: data.circles.filter((c) => c.scope === s) }));
 
   return (
     <>
       <h1>Круги истории — каркас драматургии</h1>
       <p className="muted">
-        Круг истории (Р-020) — несущий каркас драматургии и темпа: круг тома → круги частей ({data.parts.length}) →
+        Круг истории (Р-020) — несущий каркас драматургии и темпа: круг тома → круги {nActs} актов (Р-021) →
         круги глав; каждый уровень строится внутри шага уровня выше. Черновики лежат в <code>круги_истории/</code>;
         после внесения в канон (документ 2.1) они попадают в окно Писателя («Драматургия главы») и в проверку Э2 (4.4).
         {" "}В каноне сейчас: <strong>{data.in_canon}</strong> круг(ов)
         {pending > 0 && <>, не внесено или изменено: <strong>{pending}</strong></>}.
       </p>
+      {nActs > 0 && (
+        <table>
+          <thead><tr><th>Акт</th><th>Название</th><th>Главы</th><th>Части</th><th>Шаги круга тома</th></tr></thead>
+          <tbody>
+            {data.acts.map((a) => (
+              <tr key={a.act}>
+                <td>{a.act}</td><td>«{a.title}»</td><td>{a.from_chapter}–{a.to_chapter}</td><td>{a.parts}</td><td>{a.steps}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       <div className="actions">
         <button className="primary" disabled={busy} onClick={() => generate("всё")}>Построить все круги</button>
         <button disabled={busy} onClick={() => generate("книга")}>Книга</button>
-        <button disabled={busy} onClick={() => generate("части")}>Части</button>
+        <button disabled={busy} onClick={() => generate("акты")}>Акты</button>
         <button disabled={busy} onClick={() => generate("главы")}>Главы</button>
         <button disabled={busy} onClick={() => generate("всё", true)}>Пересчитать всё</button>
         <button className={pending > 0 ? "primary" : ""} disabled={busy || data.circles.length === 0} onClick={toCanon}>
@@ -122,21 +137,22 @@ export function Circles(props: {
         </details>
       )}
 
-      {data.circles.length === 0 && <p className="muted">Кругов ещё нет — нажмите «Построить все круги» (сначала строится том, затем части внутри тома, затем главы внутри частей).</p>}
+      {data.circles.length === 0 && <p className="muted">Кругов ещё нет — нажмите «Построить все круги» (сначала строится том, затем акты внутри тома, затем главы внутри актов).</p>}
 
       {groups.map(({ scope, items }) => items.length > 0 && (
         <div key={scope}>
           <h2>{SCOPE_LABEL[scope]}{scope !== "книга" ? ` (${items.length})` : ""}</h2>
           {items.map((c) => {
             const id = `${c.scope}_${c.key ?? ""}`;
-            const partTitle = c.scope === "часть" ? data.parts.find((p) => p.part === c.key)?.title : "";
+            const act = c.scope === "акт" ? data.acts.find((a) => a.act === c.key) : undefined;
+            const actTitle = act ? ` · «${act.title}» (гл. ${act.from_chapter}–${act.to_chapter})` : "";
             const status = data.canon_status[stemOf(c)] ?? "не в каноне";
             return (
               <div className="card" key={id}>
                 <div className="row" style={{ display: "flex", justifyContent: "space-between", cursor: "pointer" }}
                   onClick={() => setOpen(open === id ? null : id)}>
                   <strong>
-                    {c.title}{partTitle ? ` · «${partTitle}»` : ""}{" "}
+                    {c.title}{c.title.includes("«") ? "" : actTitle}{" "}
                     <span className={"badge" + (status === "в каноне" ? " b-зафиксировано" : "")}>{status}</span>
                   </strong>
                   <span className="muted">{c.summary}</span>

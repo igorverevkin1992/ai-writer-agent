@@ -161,8 +161,7 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
 
     # каркас драматургии (Р-020): только из канона (2.1 → circles.json), не из черновиков
     try:
-        parts = exporter.load_parts(exports_dir)
-        drama = circles.frame_for_chapter(exporter.load_circles(exports_dir), parts, chapter)
+        drama = circles.frame_for_chapter(exporter.load_circles(exports_dir), exporter.load_acts(exports_dir), chapter)
     except FileNotFoundError:
         drama = circles.frame_for_chapter([], [], chapter)
 

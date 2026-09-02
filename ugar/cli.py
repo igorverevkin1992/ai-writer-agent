@@ -706,7 +706,7 @@ def cmd_find(query: str) -> None:
 @app.command("circles", rich_help_panel="Качество и регрессия")
 @_friendly
 def cmd_circles(
-    scope: str = typer.Argument("всё", help="книга | части | главы | всё"),
+    scope: str = typer.Argument("всё", help="книга | акты | главы | всё"),
     chapter: int | None = typer.Option(None, "--глава", "--chapter", help="Только одна глава (для охвата «главы»)."),
     redo: bool = typer.Option(False, "--заново", "--redo", help="Пересчитать уже существующие круги."),
     to_canon: bool = typer.Option(
@@ -714,7 +714,7 @@ def cmd_circles(
     ),
     yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Круги истории (8 шагов) — каркас драматургии (Р-020): книга → части → главы; черновики в круги_истории/."""
+    """Круги истории (8 шагов) — каркас драматургии (Р-020): книга → четыре акта → главы; черновики в круги_истории/."""
     from . import circles as circles_mod
 
     ws, cfg, lib = _ctx()

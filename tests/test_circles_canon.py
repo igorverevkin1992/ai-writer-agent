@@ -5,9 +5,9 @@ import subprocess
 
 from ugar import circles, compiler, exporter, realcanon, verifier2
 from ugar.config import Config
-from ugar.schemas import CircleStep, StoryCircle
+from ugar.schemas import Act, CircleStep, StoryCircle
 
-PARTS = [{"part": 1, "title": "МОКРОЕ ДЕЛО", "period": "апрель", "from_chapter": 1, "to_chapter": 2}]
+ACTS = [Act(act=1, title="МОКРОЕ ДЕЛО", from_chapter=1, to_chapter=2, parts="I", steps="1–2")]
 
 
 def _sample() -> list[StoryCircle]:
@@ -15,7 +15,7 @@ def _sample() -> list[StoryCircle]:
     book = StoryCircle(scope="книга", title="Книга (том целиком)", summary="сыщик против аппарата", weak_spot="шаг 6",
                        steps=[CircleStep(n=i + 1, name=names[i], text=f"том шаг {i + 1}", chapters=f"гл. {i + 1}")
                               for i in range(8)])
-    part = StoryCircle(scope="часть", key=1, summary="первая часть",
+    part = StoryCircle(scope="акт", key=1, summary="первый акт",
                        steps=[CircleStep(n=1, name="Ты", text="Лемм у сейфа", chapters="гл. 1"),
                               CircleStep(n=2, name="Потребность", text="сирота рядом", chapters="гл. 1–2")])
     ch = StoryCircle(scope="глава", key=1, summary="осмотр", steps=[
@@ -26,17 +26,20 @@ def _sample() -> list[StoryCircle]:
 
 
 def test_документ_2_1_туда_и_обратно(tmp_path):
-    doc = circles.render_canon_doc(_sample(), PARTS)
-    assert "## Круг тома" in doc and "## Круг части I «МОКРОЕ ДЕЛО» (гл. 1–2)" in doc and "## Круг главы 1" in doc
+    doc = circles.render_canon_doc(_sample(), ACTS)
+    assert "## Круг тома" in doc and "## Круг акта 1 «МОКРОЕ ДЕЛО» (гл. 1–2)" in doc and "## Круг главы 1" in doc
+    assert "| 1 | «МОКРОЕ ДЕЛО» | 1–2 | I | 1–2 |" in doc
     path = tmp_path / "21_Круги_истории_Том1.md"
     path.write_text(doc, encoding="utf-8")
+    acts = realcanon.parse_acts(path)
+    assert [(a.act, a.from_chapter, a.to_chapter, a.parts) for a in acts] == [(1, 1, 2, "I")]
     parsed = realcanon.parse_circles(path)
-    assert [(c.scope, c.key) for c in parsed] == [("книга", None), ("часть", 1), ("глава", 1)]
+    assert [(c.scope, c.key) for c in parsed] == [("книга", None), ("акт", 1), ("глава", 1)]
     book, part, ch = parsed
     assert book.summary == "сыщик против аппарата" and book.weak_spot == "шаг 6"
     assert [(s.from_chapter, s.to_chapter) for s in part.steps] == [(1, 1), (1, 2)]
     assert ch.steps[1].chapters == "сц. 1.2, финал" and ch.steps[1].from_chapter is None
-    assert part.title == "Часть 1 «МОКРОЕ ДЕЛО»"
+    assert part.title == "Акт 1 «МОКРОЕ ДЕЛО»"
     # шаги тома, на которые приходится глава 2
     assert [s.n for s in book.steps_for_chapter(2)] == [2]
     assert [s.n for s in part.steps_for_chapter(2)] == [2]
@@ -58,14 +61,15 @@ def test_окно_и_э2_без_каркаса(ws, library):
 
 def test_окно_и_э2_с_каркасом(ws, library):
     sample = _sample()
-    (library / "21_Круги_истории_Том1.md").write_text(circles.render_canon_doc(sample, []), encoding="utf-8")
+    (library / "21_Круги_истории_Том1.md").write_text(circles.render_canon_doc(sample, ACTS), encoding="utf-8")
     exporter.run_export(library, ws.exports, ws.logs)
-    assert len(exporter.load_circles(ws.exports)) == 3
+    assert len(exporter.load_circles(ws.exports)) == 3 and len(exporter.load_acts(ws.exports)) == 1
 
     path, _ = compiler.compile_window(ws, library, 1)
     w = path.read_text(encoding="utf-8")
     assert "## Драматургия главы" in w
     assert "- Том: шаг 1 «Ты» (гл. 1) — том шаг 1" in w
+    assert "- Акт 1 «МОКРОЕ ДЕЛО»: шаг 1 «Ты» (гл. 1) — Лемм у сейфа" in w
     assert "- Круг главы: осмотр" in w and "8. Изменение (сц. 1.2, финал) — метод показан" in w
     assert "в канон ещё не внесён" not in w
     # слабое место — заметка аналитика, Писателю не показывается
@@ -124,9 +128,24 @@ def test_внесение_в_канон(ws, library, monkeypatch):
 
 
 def test_вложенность_материалов(ws, library):
-    """Часть строится внутри шагов тома, глава — внутри шагов части и тома (черновики поверх канона)."""
+    """Акт строится внутри шагов тома, глава — внутри шагов акта и тома (черновики поверх канона)."""
     book, part, ch = _sample()
     circles.save_circle(ws, "книга", None, json.loads(book.model_dump_json()))
     title, material = circles.build_material(ws, "глава", 1)
     assert "## Каркас уровня выше" in material and "Том: шаг 1 «Ты» (гл. 1) — том шаг 1" in material
     assert "Круг главы" not in material  # свой круг главы в материал не входит
+
+
+def test_без_таблицы_актов_акты_равны_частям(ws, library):
+    """Демо-библиотека без 2.1: актов нет, окно собирается без каркаса; с частями — акты = части."""
+    assert exporter.load_acts(ws.exports) == []
+    parts = [{"part": 1, "title": "А", "period": "", "from_chapter": 1, "to_chapter": 3},
+             {"part": 2, "title": "Б", "period": "", "from_chapter": 4, "to_chapter": 6}]
+    from ugar import exporter as ex
+    orig = ex.export_parts
+    try:
+        ex.export_parts = lambda lib: parts
+        acts = ex.export_acts(library)
+    finally:
+        ex.export_parts = orig
+    assert [(a.act, a.title, a.parts, a.to_chapter) for a in acts] == [(1, "А", "I", 3), (2, "Б", "II", 6)]

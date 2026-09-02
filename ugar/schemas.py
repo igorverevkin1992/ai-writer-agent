@@ -117,10 +117,21 @@ class CircleStep(BaseModel):
     to_chapter: int | None = None
 
 
-class StoryCircle(BaseModel):
-    """Круг истории (circles.json — из 2.1): несущий каркас драматургии тома, части, главы."""
+class Act(BaseModel):
+    """Акт тома (acts.json — таблица «Акты тома» документа 2.1, Р-021)."""
 
-    scope: Literal["книга", "часть", "глава"]
+    act: int
+    title: str = ""
+    from_chapter: int
+    to_chapter: int
+    parts: str = ""   # какие части реестра 2.2 покрывает («III–IV»)
+    steps: str = ""   # шаги круга тома, за которые отвечает акт («5–6 «Обретение», «Расплата»»)
+
+
+class StoryCircle(BaseModel):
+    """Круг истории (circles.json — из 2.1): несущий каркас драматургии тома, акта, главы."""
+
+    scope: Literal["книга", "акт", "глава"]
     key: int | None = None
     title: str = ""
     summary: str = ""
@@ -128,7 +139,7 @@ class StoryCircle(BaseModel):
     steps: list[CircleStep] = Field(default_factory=list)
 
     def steps_for_chapter(self, chapter: int) -> list[CircleStep]:
-        """Шаги тома/части, на которые приходится глава."""
+        """Шаги тома/акта, на которые приходится глава."""
         return [
             st for st in self.steps
             if st.from_chapter is not None and st.from_chapter <= chapter <= (st.to_chapter or st.from_chapter)
