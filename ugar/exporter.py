@@ -26,6 +26,7 @@ from .schemas import (
     Norm,
     Plant,
     StopRule,
+    StoryCircle,
 )
 
 # Обязательные идентификаторы норм (02 §5) — verifier-1 берёт пороги только отсюда.
@@ -409,6 +410,19 @@ def load_parts(exports_dir: Path) -> list[dict]:
     return load_export(exports_dir, "parts.json")
 
 
+CIRCLES_DOC_GLOB = "21_Круги_истории*.md"
+
+
+def export_circles(library: Path) -> list[StoryCircle]:
+    """Круги истории (2.1, Р-020) — несущий каркас драматургии; документа может ещё не быть."""
+    docs = sorted(library.glob(CIRCLES_DOC_GLOB))
+    return realcanon.parse_circles(docs[0]) if docs else []
+
+
+def load_circles(exports_dir: Path) -> list[StoryCircle]:
+    return [StoryCircle.model_validate(c) for c in load_export(exports_dir, "circles.json")]
+
+
 def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
     """corpus/ — принятые главы в нормализованном виде (для n-грамм и TTR)."""
     corpus_dir = exports_dir / "corpus"
@@ -448,6 +462,7 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, st
         "dossiers.json": export_dossiers(library),
         "infobans.json": export_infobans(library),
         "parts.json": export_parts(library),
+        "circles.json": export_circles(library),
     }
     hashes: dict[str, str] = {}
     for name, data in parsed.items():

@@ -119,6 +119,12 @@ def cmd_compile(chapter: int) -> None:
             fg=typer.colors.YELLOW,
         )
     typer.secho(f"Окно собрано: {path} (~{size} символов)", fg=typer.colors.GREEN)
+    if breakdown.get("драматургия", 0) and "в канон ещё не внесён" in path.read_text(encoding="utf-8"):
+        typer.secho(
+            f"⚠ Каркас драматургии главы {chapter} в канон не внесён (Р-020): `ugar circles` → "
+            "`ugar circles --в-канон`, затем пересоберите окно.",
+            fg=typer.colors.YELLOW,
+        )
     if (ws.chapter_dir(chapter) / "window_size_флаг.md").exists() and size > cfg.window_soft_limit_chars:
         typer.secho(
             f"⚠ Превышен мягкий лимит окна {cfg.window_soft_limit_chars} символов (Д-12) — "
@@ -703,12 +709,31 @@ def cmd_circles(
     scope: str = typer.Argument("всё", help="книга | части | главы | всё"),
     chapter: int | None = typer.Option(None, "--глава", "--chapter", help="Только одна глава (для охвата «главы»)."),
     redo: bool = typer.Option(False, "--заново", "--redo", help="Пересчитать уже существующие круги."),
+    to_canon: bool = typer.Option(
+        False, "--в-канон", "--to-canon", help="Внести черновики кругов в документ 2.1 библиотеки и закоммитить (Д-8)."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Круги истории (8 шагов) для книги, частей и глав — черновики в круги_истории/."""
+    """Круги истории (8 шагов) — каркас драматургии (Р-020): книга → части → главы; черновики в круги_истории/."""
     from . import circles as circles_mod
 
     ws, cfg, lib = _ctx()
     exporter.run_export(lib, ws.exports, ws.logs)
+    if to_canon:
+        n = len(circles_mod.drafts(ws))
+        if not n:
+            _fail("черновиков кругов нет — сначала `ugar circles`.")
+        if not yes and not typer.confirm(
+            f"Внести {n} круг(ов) в {circles_mod.CANON_DOC} библиотеки и закоммитить? (Д-8) (y)"
+        ):
+            raise typer.Exit()
+        try:
+            path, commit = circles_mod.commit_to_canon(ws, cfg, lib)
+        except RuntimeError as e:
+            _fail(str(e))
+        typer.secho(f"Круги внесены в канон: {path}. Коммит: {commit}", fg=typer.colors.GREEN)
+        typer.echo("Окна глав теперь содержат секцию «Драматургия»; пересоберите начатые главы (`ugar compile N`).")
+        return
     result = circles_mod.run(ws, cfg, scope, chapter, only_missing=not redo)
     for path in result["готово"]:
         typer.secho(f"  ✓ {path}", fg=typer.colors.GREEN)

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from . import adapters, compiler, exporter, guard, llmjson
+from . import adapters, circles, compiler, exporter, guard, llmjson
 from .config import Config
 from .paths import Workspace
 from .schemas import Flag
@@ -36,6 +36,13 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
     continuity = exporter.load_continuity(exports_dir)
     plants = compiler.chapter_plants(exports_dir, brief)
     text = ws.draft_path(chapter, draft).read_text(encoding="utf-8")
+    try:
+        drama = circles.frame_for_chapter(exporter.load_circles(exports_dir), exporter.load_parts(exports_dir), chapter)
+    except FileNotFoundError:
+        drama = circles.frame_for_chapter([], [], chapter)
+    drama_lines = circles.frame_lines(drama, with_weak_spot=True) or [
+        "- (каркас в канон не внесён — проверка драматургии ограничивается собственным движением главы)"
+    ]
 
     participants = sorted(set([brief.focal, *brief.participants]) - {""})
     line_rules = [
@@ -76,6 +83,9 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
             "",
             "## Стоп-листы линий (фокализация)",
             *line_rules,
+            "",
+            "## Драматургия: каркас круга истории (2.1, Р-020)",
+            *drama_lines,
             "",
             "## Хронология (сверка дат и анахронизмов)",
             *[f"- {c.date}: {c.event}" + (f" (гл. {c.chapters})" if c.chapters else "") for c in continuity],

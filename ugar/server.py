@@ -32,6 +32,7 @@ from .schemas import Resolution
 COMMANDS = {
     "run", "export", "compile", "write", "verify1", "verify2", "review",
     "apply-edits", "diff-check", "regress", "canonize", "canonize-apply", "story-circles",
+    "circles-canon",
 }
 
 
@@ -359,6 +360,8 @@ class PanelAPI:
             parts = []
         return {
             "circles": circles_mod.list_circles(self.ws),
+            "canon_status": circles_mod.canon_status(self.ws),
+            "in_canon": len(circles_mod.canon_circles(self.ws)),
             "parts": parts,
             "prompts": sorted(p.name for p in prompts_dir.glob("*.md")) if prompts_dir.exists() else [],
         }
@@ -382,8 +385,11 @@ class PanelAPI:
         params = params or {}
         fns = {
             "story-circles": lambda: cli.cmd_circles(
-                params.get("scope", "всё"), chapter=params.get("chapter"), redo=bool(params.get("redo"))
+                params.get("scope", "всё"), chapter=params.get("chapter"), redo=bool(params.get("redo")),
+                to_canon=False, yes=True,
             ),
+            # подтверждение автор дал диалогом в панели (Д-8)
+            "circles-canon": lambda: cli.cmd_circles("всё", chapter=None, redo=False, to_canon=True, yes=True),
             "run": lambda: cli.cmd_run(chapter),  # машинные шаги до паузы автора (FR-O1)
             "export": lambda: cli.cmd_export(),
             "compile": lambda: cli.cmd_compile(chapter),

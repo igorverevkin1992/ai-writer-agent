@@ -29,8 +29,12 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
   = рабочая область (`config.yaml` в корне). Тесты на неё — `tests/test_real_canon.py`.
 - `ugar/verifier1.py` — проверки Э1; пороги ТОЛЬКО из norms.json (критерий 6),
   констант в коде быть не должно.
-- `ugar/verifier2.py`, `ugar/canonist.py`, `ugar/circles.py` (круги истории) — LLM-роли; JSON из ответов — через
+- `ugar/verifier2.py`, `ugar/canonist.py`, `ugar/circles.py` — LLM-роли; JSON из ответов — через
   `ugar/llmjson.py`; деградация без API обязана сохраняться.
+- `ugar/circles.py` — круги истории = несущий каркас драматургии (Р-020): том → части →
+  главы, каждый уровень внутри шага уровня выше. Черновики в `круги_истории/`; в канон
+  (`21_Круги_истории_Том1.md`, парсер `realcanon.parse_circles`) — только `commit_to_canon`
+  по подтверждению автора. Окно (секция «драматургия») и Э2 читают ТОЛЬКО канон (`circles.json`).
 - `ugar/server.py` — локальный сервер панели (только 127.0.0.1); вызывает
   функции cli, POST защищён заголовком `X-Ugar-Panel`; одна фоновая задача
   за раз (redirect_stdout глобален — см. `ensure_idle`).

@@ -5,9 +5,21 @@ import type { Notify } from "./App";
 interface Step { n: number; name: string; text: string; chapters?: string }
 interface Circle { scope: string; key: number | null; title: string; steps: Step[]; weak_spot?: string; summary?: string; generated?: string }
 interface Part { part: number; title: string; from_chapter: number; to_chapter: number }
-interface CirclesData { circles: Circle[]; parts: Part[]; prompts: string[] }
+interface CirclesData {
+  circles: Circle[];
+  parts: Part[];
+  prompts: string[];
+  canon_status: Record<string, string>;
+  in_canon: number;
+}
 
-const SCOPE_LABEL: Record<string, string> = { книга: "Книга", часть: "Часть", глава: "Глава" };
+const SCOPE_LABEL: Record<string, string> = { книга: "Книга", часть: "Части", глава: "Главы" };
+
+function stemOf(c: Circle): string {
+  if (c.scope === "книга") return "книга";
+  if (c.scope === "часть") return `часть_${c.key}`;
+  return `глава_${String(c.key ?? 0).padStart(2, "0")}`;
+}
 
 export function Circles(props: {
   busy: boolean;
@@ -32,6 +44,16 @@ export function Circles(props: {
     const count = scope === "книга" ? 1 : scope === "части" ? data.parts.length : scope === "главы" ? 46 : 1 + data.parts.length + 46;
     if (!window.confirm(`Построить круги истории: ${scope} (${count} вызов(ов) модели${redo ? ", с пересчётом" : ""})?`)) return;
     await runCommand("story-circles", undefined, { scope, redo });
+  };
+
+  const pending = Object.values(data.canon_status).filter((s) => s !== "в каноне").length;
+
+  const toCanon = async () => {
+    if (!window.confirm(
+      `Внести ${data.circles.length} круг(ов) в документ 2.1 библиотеки (21_Круги_истории_Том1.md) и закоммитить канон? ` +
+      "После этого окна глав получат секцию «Драматургия», а Э2 — проверку 4.4. (Д-8)"
+    )) return;
+    await runCommand("circles-canon");
   };
 
   const copyPrompt = async (stem: string) => {
@@ -62,11 +84,13 @@ export function Circles(props: {
 
   return (
     <>
-      <h1>Круги истории</h1>
+      <h1>Круги истории — каркас драматургии</h1>
       <p className="muted">
-        Восемь шагов («Ты → Потребность → Переход → Поиск → Обретение → Расплата → Возвращение → Изменение»)
-        по материалу канона — для книги, каждой части ({data.parts.length}) и каждой главы. Черновики
-        лежат в <code>круги_истории/</code>; в канон вносятся через canon-commit.
+        Круг истории (Р-020) — несущий каркас драматургии и темпа: круг тома → круги частей ({data.parts.length}) →
+        круги глав; каждый уровень строится внутри шага уровня выше. Черновики лежат в <code>круги_истории/</code>;
+        после внесения в канон (документ 2.1) они попадают в окно Писателя («Драматургия главы») и в проверку Э2 (4.4).
+        {" "}В каноне сейчас: <strong>{data.in_canon}</strong> круг(ов)
+        {pending > 0 && <>, не внесено или изменено: <strong>{pending}</strong></>}.
       </p>
       <div className="actions">
         <button className="primary" disabled={busy} onClick={() => generate("всё")}>Построить все круги</button>
@@ -74,6 +98,9 @@ export function Circles(props: {
         <button disabled={busy} onClick={() => generate("части")}>Части</button>
         <button disabled={busy} onClick={() => generate("главы")}>Главы</button>
         <button disabled={busy} onClick={() => generate("всё", true)}>Пересчитать всё</button>
+        <button className={pending > 0 ? "primary" : ""} disabled={busy || data.circles.length === 0} onClick={toCanon}>
+          Внести в канон{pending > 0 ? ` (${pending})` : ""}
+        </button>
       </div>
 
       {data.prompts.length > 0 && (
@@ -95,7 +122,7 @@ export function Circles(props: {
         </details>
       )}
 
-      {data.circles.length === 0 && <p className="muted">Кругов ещё нет — нажмите «Построить все круги».</p>}
+      {data.circles.length === 0 && <p className="muted">Кругов ещё нет — нажмите «Построить все круги» (сначала строится том, затем части внутри тома, затем главы внутри частей).</p>}
 
       {groups.map(({ scope, items }) => items.length > 0 && (
         <div key={scope}>
@@ -103,11 +130,15 @@ export function Circles(props: {
           {items.map((c) => {
             const id = `${c.scope}_${c.key ?? ""}`;
             const partTitle = c.scope === "часть" ? data.parts.find((p) => p.part === c.key)?.title : "";
+            const status = data.canon_status[stemOf(c)] ?? "не в каноне";
             return (
               <div className="card" key={id}>
                 <div className="row" style={{ display: "flex", justifyContent: "space-between", cursor: "pointer" }}
                   onClick={() => setOpen(open === id ? null : id)}>
-                  <strong>{c.title}{partTitle ? ` · «${partTitle}»` : ""}</strong>
+                  <strong>
+                    {c.title}{partTitle ? ` · «${partTitle}»` : ""}{" "}
+                    <span className={"badge" + (status === "в каноне" ? " b-зафиксировано" : "")}>{status}</span>
+                  </strong>
                   <span className="muted">{c.summary}</span>
                 </div>
                 {open === id && (

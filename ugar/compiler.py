@@ -12,7 +12,7 @@ from pathlib import Path
 
 from jinja2 import Environment, StrictUndefined
 
-from . import exporter, guard, mdparse
+from . import circles, exporter, guard, mdparse
 from .paths import Workspace
 from .schemas import Brief, StopRule
 
@@ -159,6 +159,13 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
         _ban_text(b) for b in sorted(infobans, key=lambda b: b.ban_id) if _ban_active(b)
     ]
 
+    # каркас драматургии (Р-020): только из канона (2.1 → circles.json), не из черновиков
+    try:
+        parts = exporter.load_parts(exports_dir)
+        drama = circles.frame_for_chapter(exporter.load_circles(exports_dir), parts, chapter)
+    except FileNotFoundError:
+        drama = circles.frame_for_chapter([], [], chapter)
+
     env = Environment(undefined=StrictUndefined, trim_blocks=False, lstrip_blocks=False)
     window = env.from_string(_template_text(ws)).render(
         brief=brief,
@@ -173,6 +180,8 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
         bans=bans,
         intensifiers=intensifiers,
         volume_norm=norms.get("объём_главы"),
+        drama=drama,
+        drama_lines=circles.frame_lines(drama),
     )
 
     path = ws.window_path(chapter)

@@ -1,8 +1,12 @@
-"""Круги истории (восемь шагов) для книги, частей (актов) и глав — роль аналитика (Claude).
+"""Круги истории (восемь шагов) — несущий каркас драматургии серии (Р-020).
 
-Результаты — черновики в рабочей области `круги_истории/`; в канон их вносит
-автор через правку библиотеки и `ugar canon-commit` (FR-K3). Без API промпты
-сохраняются для ручного прогона (NFR-3).
+Три уровня вложенности: книга (том) → части (акты) → главы. Круг каждого
+уровня строится внутри шага уровня выше: часть работает на шаг тома, глава —
+на шаг части. Роль аналитика — модель Anthropic; результаты — черновики в
+`круги_истории/`; в канон (документ 2.1 `21_Круги_истории_Том1.md`) они
+вносятся только по подтверждению автора (`ugar circles --в-канон`, FR-K3),
+после чего попадают в окно Писателя (секция «Драматургия») и в проверки Э2.
+Без API промпты сохраняются для ручного прогона (NFR-3).
 """
 
 from __future__ import annotations
@@ -12,11 +16,15 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from . import adapters, exporter, guard, llmjson
+from . import adapters, exporter, gitops, guard, llmjson, realcanon
 from .config import Config
 from .paths import Workspace
+from .schemas import CircleStep, StoryCircle
 
 SCOPES = ("книга", "части", "главы", "всё")
+STEP_NAMES = ["Ты", "Потребность", "Переход", "Поиск", "Обретение", "Расплата", "Возвращение", "Изменение"]
+CANON_DOC = "21_Круги_истории_Том1.md"
+_ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
 
 
 def _template(ws: Workspace) -> str:
@@ -28,6 +36,76 @@ def _template(ws: Workspace) -> str:
 
 def _dir(ws: Workspace) -> Path:
     return ws.root / "круги_истории"
+
+
+# ------------------------------------------------------------ модель круга
+
+
+def to_model(data: dict) -> StoryCircle:
+    """JSON черновика (ответ модели + scope/key) → StoryCircle с разобранными диапазонами глав."""
+    steps = []
+    for i, st in enumerate(data.get("steps", []), start=1):
+        chapters = str(st.get("chapters", "") or "").strip()
+        lo, hi = realcanon.chapter_range(chapters)
+        steps.append(CircleStep(
+            n=int(st.get("n", i)), name=str(st.get("name", "") or STEP_NAMES[min(i, 8) - 1]).strip(),
+            text=str(st.get("text", "") or "").strip(), chapters=chapters, from_chapter=lo, to_chapter=hi,
+        ))
+    return StoryCircle(
+        scope=data.get("scope", "глава"), key=data.get("key"), title=str(data.get("title", "") or ""),
+        summary=str(data.get("summary", "") or ""), weak_spot=str(data.get("weak_spot", "") or ""), steps=steps,
+    )
+
+
+def drafts(ws: Workspace) -> list[StoryCircle]:
+    """Черновики кругов рабочей области (круги_истории/*.json)."""
+    return [to_model(c) for c in list_circles(ws)]
+
+
+def canon_circles(ws: Workspace) -> list[StoryCircle]:
+    """Круги, внесённые в канон (exports/circles.json); пусто, если документа 2.1 ещё нет."""
+    try:
+        return exporter.load_circles(ws.exports)
+    except FileNotFoundError:
+        return []
+
+
+def _pick(circles: list[StoryCircle], scope: str, key: int | None) -> StoryCircle | None:
+    return next((c for c in circles if c.scope == scope and c.key == key), None)
+
+
+def frame_for_chapter(circles: list[StoryCircle], parts: list[dict], chapter: int) -> dict:
+    """Каркас главы: шаги тома и части, на которые она приходится, и её собственный круг."""
+    part = next((p for p in parts if p["from_chapter"] <= chapter <= p["to_chapter"]), None)
+    book = _pick(circles, "книга", None)
+    part_circle = _pick(circles, "часть", part["part"]) if part else None
+    return {
+        "part": part,
+        "book_steps": book.steps_for_chapter(chapter) if book else [],
+        "part_steps": part_circle.steps_for_chapter(chapter) if part_circle else [],
+        "chapter": _pick(circles, "глава", chapter),
+        "has_any": bool(book or part_circle or _pick(circles, "глава", chapter)),
+    }
+
+
+def frame_lines(frame: dict, with_weak_spot: bool = False) -> list[str]:
+    """Текстовое представление каркаса — для промптов Писателя, аналитика и Э2."""
+    lines: list[str] = []
+    for st in frame["book_steps"]:
+        lines.append(f"- Том: шаг {st.n} «{st.name}» ({st.chapters}) — {st.text}")
+    part = frame.get("part")
+    for st in frame["part_steps"]:
+        label = f"Часть {part['part']} «{part['title']}»" if part else "Часть"
+        lines.append(f"- {label}: шаг {st.n} «{st.name}» ({st.chapters}) — {st.text}")
+    ch = frame.get("chapter")
+    if ch:
+        lines.append(f"- Круг главы: {ch.summary}" if ch.summary else "- Круг главы:")
+        for st in ch.steps:
+            where = f" ({st.chapters})" if st.chapters else ""
+            lines.append(f"  {st.n}. {st.name}{where} — {st.text}")
+        if with_weak_spot and ch.weak_spot:
+            lines.append(f"  Слабое место (по оценке аналитика): {ch.weak_spot}")
+    return lines
 
 
 # ------------------------------------------------------------ материалы
@@ -45,6 +123,36 @@ def _chapter_rows(briefs, lo: int | None = None, hi: int | None = None) -> list[
     return rows
 
 
+def _known_circles(ws: Workspace) -> list[StoryCircle]:
+    """Каркас для вложенности при построении: черновики поверх канона (черновик новее)."""
+    merged = {(c.scope, c.key): c for c in canon_circles(ws)}
+    for c in drafts(ws):
+        merged[(c.scope, c.key)] = c
+    return list(merged.values())
+
+
+def _outer_frame(ws: Workspace, scope: str, key: int | None) -> list[str]:
+    """Шаги уровня выше, внутри которых строится круг (часть — в томе, глава — в части и томе)."""
+    circles = _known_circles(ws)
+    parts = exporter.load_parts(ws.exports)
+    if scope == "часть":
+        part = next((p for p in parts if p["part"] == key), None)
+        book = _pick(circles, "книга", None)
+        if not part or not book:
+            return []
+        lo, hi = part["from_chapter"], part["to_chapter"]
+        return [
+            f"- Том: шаг {st.n} «{st.name}» ({st.chapters}) — {st.text}"
+            for st in book.steps
+            if st.from_chapter is not None and st.from_chapter <= hi and (st.to_chapter or st.from_chapter) >= lo
+        ]
+    if scope == "глава":
+        frame = frame_for_chapter(circles, parts, int(key or 0))
+        frame["chapter"] = None
+        return frame_lines(frame)
+    return []
+
+
 def build_material(ws: Workspace, scope: str, key: int | None = None) -> tuple[str, str]:
     """(заголовок, материал) для круга: книга / часть N / глава N."""
     ex = ws.exports
@@ -54,6 +162,8 @@ def build_material(ws: Workspace, scope: str, key: int | None = None) -> tuple[s
         f"- {b.text} (читатель узнаёт: {'гл. ' + str(b.until_chapter) if b.until_chapter else 'не в этом томе'})"
         for b in bans if b.secret
     ]
+    outer = _outer_frame(ws, scope, key)
+    outer_block = ["## Каркас уровня выше (круг строится ВНУТРИ этих шагов)", *outer, ""] if outer else []
     if scope == "книга":
         parts = exporter.load_parts(ex)
         parts_lines = [f"- Часть {p['part']} «{p['title']}» — {p['period']} (гл. {p['from_chapter']}–{p['to_chapter']})" for p in parts]
@@ -67,7 +177,7 @@ def build_material(ws: Workspace, scope: str, key: int | None = None) -> tuple[s
             raise FileNotFoundError(f"части {key} нет в реестре")
         lo, hi = part["from_chapter"], part["to_chapter"]
         material = "\n".join(
-            [f"## Часть {part['part']} «{part['title']}» — {part['period']}", *_chapter_rows(briefs, lo, hi), "",
+            [*outer_block, f"## Часть {part['part']} «{part['title']}» — {part['period']}", *_chapter_rows(briefs, lo, hi), "",
              "## Тайны, раскрываемые читателю в этой части",
              *[s for b, s in zip([b for b in bans if b.secret], secrets) if b.until_chapter and lo <= b.until_chapter <= hi]]
         )
@@ -81,7 +191,7 @@ def build_material(ws: Workspace, scope: str, key: int | None = None) -> tuple[s
 
         plants = [f"- [{p.plant_id}] {p.what}" for p in compiler.chapter_plants(ex, brief)]
         material = "\n".join(
-            [f"## Глава {key} · {brief.date} · фокал {brief.focal}", "### Сцены", *[f"- {s}" for s in brief.scenes],
+            [*outer_block, f"## Глава {key} · {brief.date} · фокал {brief.focal}", "### Сцены", *[f"- {s}" for s in brief.scenes],
              "### Биты", *[f"- {b}" for b in brief.beats], "### Что знает фокал", *known, "### Закладки главы", *plants]
         )
         return f"Глава {key}", material
@@ -137,7 +247,8 @@ def save_circle(ws: Workspace, scope: str, key: int | None, circle: dict) -> Pat
 
 
 def run(ws: Workspace, cfg: Config, scope: str, chapter: int | None = None, only_missing: bool = True) -> dict:
-    """Генерация кругов. Возвращает {готово: [...], промпты: [...]} — промпты для ручного прогона."""
+    """Генерация кругов сверху вниз (том → части → главы): каждый уровень строится
+    внутри уже построенного уровня выше. Возвращает {готово, промпты, ручной_режим}."""
     done: list[str] = []
     prompts: list[str] = []
     system = _template(ws)
@@ -180,3 +291,89 @@ def list_circles(ws: Workspace) -> list[dict]:
             continue
     order = {"книга": 0, "часть": 1, "глава": 2}
     return sorted(out, key=lambda c: (order.get(c.get("scope"), 9), c.get("key") or 0))
+
+
+# ------------------------------------------------------------ канон (2.1)
+
+
+def render_canon_doc(circles: list[StoryCircle], parts: list[dict]) -> str:
+    """Документ 2.1 из кругов — в разметке, которую читает exporter (Д-1)."""
+    order = {"книга": 0, "часть": 1, "глава": 2}
+    lines = [
+        "# 2.1. Круги истории — Том 1",
+        "## Версия 1.0 · Р-020. Несущий каркас драматургии: том → части (акты) → главы",
+        "",
+        "Документ генерируется конвейером из черновиков `круги_истории/` по подтверждению автора "
+        "(`ugar circles --в-канон`) и правится автором как любой документ канона. Что читает машина: "
+        "заголовки «## Круг тома» / «## Круг части N …» / «## Круг главы N», строка «**Суть:**», "
+        "восемь нумерованных шагов «N. **Имя** (гл. A–B) — текст», строка «**Слабое место:**». "
+        "Диапазоны глав шагов тома и частей — единственная привязка главы к её шагу.",
+        "",
+    ]
+    for c in sorted(circles, key=lambda c: (order.get(c.scope, 9), c.key or 0)):
+        if c.scope == "книга":
+            lines.append("## Круг тома")
+        elif c.scope == "часть":
+            part = next((p for p in parts if p["part"] == c.key), None)
+            roman = _ROMAN[c.key - 1] if c.key and 0 < c.key <= len(_ROMAN) else str(c.key)
+            tail = f" «{part['title']}» (гл. {part['from_chapter']}–{part['to_chapter']})" if part else ""
+            lines.append(f"## Круг части {roman}{tail}")
+        else:
+            lines.append(f"## Круг главы {c.key}")
+        if c.summary:
+            lines.append(f"**Суть:** {c.summary}")
+        for st in c.steps:
+            where = f" ({st.chapters})" if st.chapters else ""
+            lines.append(f"{st.n}. **{st.name}**{where} — {st.text}")
+        if c.weak_spot:
+            lines.append(f"**Слабое место:** {c.weak_spot}")
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def canon_status(ws: Workspace) -> dict[str, str]:
+    """Для панели: по каждому черновику — «в каноне» / «отличается от канона» / «не в каноне»."""
+    canon = {(c.scope, c.key): c for c in canon_circles(ws)}
+    status: dict[str, str] = {}
+    for d in drafts(ws):
+        c = canon.get((d.scope, d.key))
+        if c is None:
+            status[_file_stem(d.scope, d.key)] = "не в каноне"
+        elif [(s.n, s.name, s.text, s.chapters) for s in c.steps] == [(s.n, s.name, s.text, s.chapters) for s in d.steps] \
+                and c.summary == d.summary:
+            status[_file_stem(d.scope, d.key)] = "в каноне"
+        else:
+            status[_file_stem(d.scope, d.key)] = "отличается от канона"
+    return status
+
+
+def commit_to_canon(ws: Workspace, cfg: Config, library: Path) -> tuple[Path, str]:
+    """Вносит черновики кругов в документ 2.1 библиотеки (FR-K3: только по подтверждению автора).
+
+    Черновики заменяют одноимённые круги канона; круги канона, у которых черновика нет,
+    сохраняются. Затем перегенерация выгрузок и git-коммит канона.
+    """
+    new = drafts(ws)
+    if not new:
+        raise RuntimeError("черновиков кругов нет — сначала постройте их (`ugar circles`).")
+    if gitops.is_repo(library):
+        if gitops.dirty(library):
+            raise RuntimeError(
+                "в библиотеке незакоммиченные изменения — внесение кругов требует чистого git. "
+                "Закоммитьте их (`ugar canon-commit`) или откатите, затем повторите."
+            )
+        if not gitops.has_identity(library):
+            raise RuntimeError("git не настроен: задайте user.name/user.email в библиотеке.")
+    merged = {(c.scope, c.key): c for c in canon_circles(ws)}
+    for c in new:
+        merged[(c.scope, c.key)] = c
+    parts = exporter.load_parts(ws.exports)
+    path = library / CANON_DOC
+    with guard.canon_write_session():
+        guard.write_text(path, render_canon_doc(list(merged.values()), parts))
+    exporter.run_export(library, ws.exports, ws.logs)
+    n = len(new)
+    message = f"[круги истории] внесено кругов: {n} (каркас драматургии, Р-020)"
+    if gitops.is_repo(library):
+        return path, gitops.commit_all(library, message, author=cfg.commit_author)
+    return path, "(библиотека не под git — коммит пропущен, настройте git!)"

@@ -106,6 +106,35 @@ class InfoBan(BaseModel):
 # --------------------------------------------------------- вердикты и флаги
 
 
+class CircleStep(BaseModel):
+    """Шаг круга истории (Р-020): для тома/части — диапазон глав, для главы — место в тексте."""
+
+    n: int
+    name: str
+    text: str = ""
+    chapters: str = ""               # «гл. 1–3» / «сц. 5.1» — как в каноне
+    from_chapter: int | None = None  # разобранный диапазон (только том/часть)
+    to_chapter: int | None = None
+
+
+class StoryCircle(BaseModel):
+    """Круг истории (circles.json — из 2.1): несущий каркас драматургии тома, части, главы."""
+
+    scope: Literal["книга", "часть", "глава"]
+    key: int | None = None
+    title: str = ""
+    summary: str = ""
+    weak_spot: str = ""
+    steps: list[CircleStep] = Field(default_factory=list)
+
+    def steps_for_chapter(self, chapter: int) -> list[CircleStep]:
+        """Шаги тома/части, на которые приходится глава."""
+        return [
+            st for st in self.steps
+            if st.from_chapter is not None and st.from_chapter <= chapter <= (st.to_chapter or st.from_chapter)
+        ]
+
+
 class CheckResult(BaseModel):
     """Результат одной проверки Э1 (FR-V1.9)."""
 

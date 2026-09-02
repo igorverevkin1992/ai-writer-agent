@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import mdparse
 from .mdparse import MarkupError, cell
-from .schemas import Brief, ContinuityEvent, Dossier, InfoBan, MatrixFact, Norm, Plant, StopRule
+from .schemas import Brief, CircleStep, ContinuityEvent, Dossier, InfoBan, MatrixFact, Norm, Plant, StopRule, StoryCircle
 
 CH_RE = re.compile(r"[Гг]л\.?\s*(\d+)")
 VOL_RE = re.compile(r"[Тт]ом\w*\s*(\d+)|т\.?\s*(\d+)")
@@ -499,3 +499,64 @@ def parse_poglavnik_plants(path: Path, volume: int, existing: list[Plant]) -> li
             )
         )
     return new
+
+
+# ------------------------------------------------ круги истории (2.1, Р-020)
+
+CIRCLE_HEAD_RE = re.compile(r"^##\s*Круг\s+(тома|части\s+([IVX\d]+)|главы\s+(\d+))\b(.*)$", re.MULTILINE)
+CIRCLE_STEP_RE = re.compile(r"^(\d)\.\s+\*\*(.+?)\*\*\s*(?:\(([^)]*)\))?\s*(?:[—–-]+\s*)?(.*)$")
+_CH_RANGE_RE = re.compile(r"гл\.?\s*([\d\s,–\-]+)")
+
+
+def chapter_range(text: str) -> tuple[int | None, int | None]:
+    """«гл. 1–3» / «гл. 5» / «гл. 1, 3» → (1, 3); «сц. 5.1» → (None, None)."""
+    m = _CH_RANGE_RE.search(text)
+    if not m:
+        return None, None
+    nums = [int(x) for x in re.findall(r"\d+", m.group(1))]
+    if not nums:
+        return None, None
+    return min(nums), max(nums)
+
+
+def parse_circles(path: Path) -> list[StoryCircle]:
+    """Документ 21_Круги_истории: «## Круг тома» / «## Круг части I …» / «## Круг главы 5»,
+    внутри — «**Суть:**», нумерованные шаги «1. **Ты** (гл. 1–3) — …», «**Слабое место:**»."""
+    text = path.read_text(encoding="utf-8")
+    heads = list(CIRCLE_HEAD_RE.finditer(text))
+    circles: list[StoryCircle] = []
+    for i, h in enumerate(heads):
+        body = text[h.end(): heads[i + 1].start() if i + 1 < len(heads) else len(text)]
+        kind = h.group(1)
+        if kind == "тома":
+            scope, key, title = "книга", None, "Книга (том целиком)"
+        elif kind.startswith("части"):
+            num = h.group(2)
+            key = ROMAN.get(num, int(num) if num.isdigit() else 0)
+            tm = re.search(r"«([^»]+)»", h.group(4) or "")
+            scope, title = "часть", f"Часть {key}" + (f" «{tm.group(1)}»" if tm else "")
+        else:
+            scope, key = "глава", int(h.group(3))
+            title = f"Глава {key}"
+        circle = StoryCircle(scope=scope, key=key, title=title)
+        current: CircleStep | None = None
+        for line in body.splitlines():
+            stripped = line.strip()
+            sm = CIRCLE_STEP_RE.match(stripped)
+            if sm:
+                lo, hi = chapter_range(sm.group(3) or "")
+                current = CircleStep(
+                    n=int(sm.group(1)), name=sm.group(2).strip(), chapters=(sm.group(3) or "").strip(),
+                    text=sm.group(4).strip(), from_chapter=lo, to_chapter=hi,
+                )
+                circle.steps.append(current)
+                continue
+            if stripped.startswith("**Суть:**"):
+                circle.summary = stripped[len("**Суть:**"):].strip(); current = None
+            elif stripped.startswith("**Слабое место:**"):
+                circle.weak_spot = stripped[len("**Слабое место:**"):].strip(); current = None
+            elif stripped and current is not None and not stripped.startswith("#"):
+                current.text = (current.text + " " + stripped).strip()
+        if circle.steps:
+            circles.append(circle)
+    return circles
