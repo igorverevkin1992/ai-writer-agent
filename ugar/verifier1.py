@@ -181,10 +181,11 @@ def analyze(
     if lengths:
         add("V1.2b_доля_коротких", "доля_коротких", round(sum(1 for x in lengths if x <= short_thr) / len(lengths), 3))
         add("V1.2c_доля_длинных", "доля_длинных", round(sum(1 for x in lengths if x >= long_thr) / len(lengths), 3))
-        longest = max(zip(lengths, [s for s in sentences if textutils.words(s)]))
-        add("V1.2d_максимум_длины", "максимум_длины", longest[0], quotes=[longest[1]])
+        if "максимум_длины" in norms:  # опциональная норма
+            longest = max(zip(lengths, [s for s in sentences if textutils.words(s)]))
+            add("V1.2d_максимум_длины", "максимум_длины", longest[0], quotes=[longest[1]])
 
-    if brief.volume_words:
+    if brief.volume_words and "объём_допуск" in norms:
         deviation = abs(n_words - brief.volume_words) / brief.volume_words
         tolerance = _norm_value(norms, "объём_допуск")
         checks.append(
@@ -212,14 +213,15 @@ def analyze(
     intensifiers = {
         w.lower().replace("ё", "е") for r in stoplists if r.kind == "усилитель" for w in r.items
     }
-    int_count = sum(1 for t in tokens if t in intensifiers)
-    add(
-        "V1.4_усилители",
-        "усилители_на_1000",
-        round(int_count / n_words * 1000, 2) if n_words else 0.0,
-        quotes=_quote_sentences(sentences, intensifiers),
-        note=f"{int_count} вхождений",
-    )
+    if intensifiers and "усилители_на_1000" in norms:
+        int_count = sum(1 for t in tokens if t in intensifiers)
+        add(
+            "V1.4_усилители",
+            "усилители_на_1000",
+            round(int_count / n_words * 1000, 2) if n_words else 0.0,
+            quotes=_quote_sentences(sentences, intensifiers),
+            note=f"{int_count} вхождений",
+        )
 
     # FR-V1.5 — запрещённая лексика (год главы и фокал)
     for rule in stoplists:

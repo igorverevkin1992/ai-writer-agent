@@ -54,8 +54,9 @@ def strip_document_inserts(text: str) -> str:
 
 
 def strip_markdown(text: str) -> str:
-    """Снимает заголовки/выделение MD, чтобы счётчики видели чистую прозу."""
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.M)
+    """Снимает заголовки (целиком — это метаданные файла, не проза) и выделение MD."""
+    text = re.sub(r"^#{1,6}\s+.*$", "", text, flags=re.M)
+    text = re.sub(r"^\s*-{3,}\s*$", "", text, flags=re.M)
     text = re.sub(r"[*_`]{1,3}", "", text)
     return text
 

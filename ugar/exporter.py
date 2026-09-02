@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from . import guard, mdparse, textutils
+from . import guard, mdparse, realcanon, textutils
 from .mdparse import MarkupError, cell, parse_number
 from .schemas import (
     Brief,
@@ -33,17 +33,18 @@ REQUIRED_NORMS = [
     "средняя_длина",
     "доля_коротких",
     "доля_длинных",
-    "максимум_длины",
     "короткая_фраза_порог",
     "длинная_фраза_порог",
     "был_на_250",
-    "усилители_на_1000",
     "ttr_окно_слов",
     "ttr_мин",
-    "объём_допуск",
-    "утечка_нграмма",
-    "повтор_нграмма",
 ]
+# Опциональные нормы: максимум_длины, объём_допуск — проверки пропускаются, если их нет.
+# Пороги n-грамм заданы утверждённым ТЗ (Р-017) и берутся оттуда, если канон их не переопределил.
+TZ_DEFAULT_NORMS = {
+    "утечка_нграмма": Norm(min=6, max=6, unit="слов", source="ТЗ FR-V1.6 (Р-017)"),
+    "повтор_нграмма": Norm(min=5, max=5, unit="слов", source="ТЗ FR-V1.7 (Р-017)"),
+}
 
 
 def _find_file(library: Path, pattern: str) -> Path:
@@ -70,32 +71,55 @@ def _dump(path: Path, model: BaseModel | list | dict) -> str:
 
 def export_norms(library: Path) -> dict[str, Norm]:
     path = _find_file(library, "02_*.md")
-    table = mdparse.require_table(path, ["id", "мин", "макс"], section_pattern=r"§\s*5")
     norms: dict[str, Norm] = {}
-    for row in table.rows:
-        norm_id = cell(row, "id")
-        if not norm_id:
-            continue
-        norms[norm_id] = Norm(
-            min=parse_number(cell(row, "мин")),
-            max=parse_number(cell(row, "макс")),
-            brak=parse_number(cell(row, "брак")),
-            unit=cell(row, "единиц"),
-            source=f"{path.name} §5",
-        )
+    try:
+        table = mdparse.require_table(path, ["id", "мин", "макс"], section_pattern=r"§\s*5")
+        for row in table.rows:
+            norm_id = cell(row, "id")
+            if not norm_id:
+                continue
+            norms[norm_id] = Norm(
+                min=parse_number(cell(row, "мин")),
+                max=parse_number(cell(row, "макс")),
+                brak=parse_number(cell(row, "брак")),
+                unit=cell(row, "единиц"),
+                source=f"{path.name} §5",
+            )
+    except MarkupError:
+        # реальный канон: числовые ориентиры прозой (Р-015)
+        prose = realcanon.parse_norms_prose(path)
+        if prose is None:
+            raise
+        norms = prose
+    for norm_id, default in TZ_DEFAULT_NORMS.items():
+        norms.setdefault(norm_id, default)
+    if "усилители_на_1000" not in norms:
+        found = realcanon.parse_intensifier_norm(_journal(library))
+        if found:
+            norms["усилители_на_1000"] = found[1]
     missing = [n for n in REQUIRED_NORMS if n not in norms]
     if missing:
-        raise MarkupError(path, table.line, f"в таблице норм §5 нет обязательных id: {missing}")
+        raise MarkupError(path, 1, f"в нормах §5 нет обязательных id: {missing}")
     empty = [
         n for n in REQUIRED_NORMS
         if norms[n].min is None and norms[n].max is None and norms[n].brak is None
     ]
     if empty:
         raise MarkupError(
-            path, table.line,
+            path, 1,
             f"обязательные нормы без числового значения (мин/макс/брак): {empty} (критерий приёмки 6)",
         )
     return norms
+
+
+def _journal(library: Path):
+    matches = sorted(library.glob("36_*.md"))
+    return matches[0] if matches else library / "36_Журнал.md"
+
+
+def _registry(library: Path) -> Path | None:
+    matches = sorted(library.glob("*Реестр_информационного_режима*.md"))
+    return matches[0] if matches else None
 
 
 def export_stoplists(library: Path) -> list[StopRule]:
@@ -103,8 +127,13 @@ def export_stoplists(library: Path) -> list[StopRule]:
 
     # 0.3 — стоп-листы линий (по фокалу)
     p03 = _find_file(library, "03_*.md")
-    t = mdparse.require_table(p03, ["rule_id", "фокал", "слова"])
-    for row in t.rows:
+    try:
+        t = mdparse.require_table(p03, ["rule_id", "фокал", "слова"])
+        rows03 = t.rows
+    except MarkupError:
+        rules.extend(realcanon.parse_focal_stoplists(p03))  # «Персональные запреты линий»
+        rows03 = []
+    for row in rows03:
         rules.append(
             StopRule(
                 scope="0.3",
@@ -117,8 +146,13 @@ def export_stoplists(library: Path) -> list[StopRule]:
 
     # 0.4 — лексика эпохи (по году главы)
     p04 = _find_file(library, "04_*.md")
-    t = mdparse.require_table(p04, ["rule_id", "слова", "годы"])
-    for row in t.rows:
+    try:
+        t = mdparse.require_table(p04, ["rule_id", "слова", "годы"])
+        rows04 = t.rows
+    except MarkupError:
+        rules.extend(realcanon.parse_anachronisms(p04))  # раздел Е: анахронизмы
+        rows04 = []
+    for row in rows04:
         years = cell(row, "годы")
         applies: dict = {"all": True}
         m = re.match(r"до\s+(\d{4})", years)
@@ -138,26 +172,36 @@ def export_stoplists(library: Path) -> list[StopRule]:
             )
         )
 
-    # Р-016 — словарь наречий-усилителей (02, секция «усилител»)
+    # Р-016 — словарь наречий-усилителей: таблица в 02 либо текст решения в журнале 36
     p02 = _find_file(library, "02_*.md")
-    t = mdparse.require_table(p02, ["слово"], section_pattern=r"[Уу]силител")
-    intensifiers = [cell(row, "слово") for row in t.rows if cell(row, "слово")]
-    rules.append(
-        StopRule(
-            scope="0.4",
-            rule_id="Р-016",
-            items=intensifiers,
-            applies_to={"all": True},
-            action="флаг",
-            kind="усилитель",
+    intensifiers: list[str] = []
+    try:
+        t = mdparse.require_table(p02, ["слово"], section_pattern=r"[Уу]силител")
+        intensifiers = [cell(row, "слово") for row in t.rows if cell(row, "слово")]
+    except MarkupError:
+        found = realcanon.parse_intensifier_norm(_journal(library))
+        if found:
+            intensifiers = found[0]
+    if intensifiers:
+        rules.append(
+            StopRule(
+                scope="0.4",
+                rule_id="Р-016",
+                items=intensifiers,
+                applies_to={"all": True},
+                action="флаг",
+                kind="усилитель",
+            )
         )
-    )
     return rules
 
 
 def export_matrix(library: Path) -> list[MatrixFact]:
     path = _find_file(library, "31_*.md")
-    t = mdparse.require_table(path, ["fact_id", "факт", "субъект"])
+    try:
+        t = mdparse.require_table(path, ["fact_id", "факт", "субъект"])
+    except MarkupError:
+        return realcanon.parse_wide_matrix(path)  # широкая матрица реального канона
     facts = []
     for row in t.rows:
         ch = parse_number(cell(row, "узнаёт"))
@@ -188,6 +232,10 @@ def _parse_place(text: str) -> dict:
 
 
 def export_plants(library: Path) -> list[Plant]:
+    if not sorted(library.glob("32_*.md")):
+        reg = _registry(library)
+        if reg is not None:
+            return realcanon.parse_plants_registry(reg)  # §7 «Реестр дальних закладок»
     path = _find_file(library, "32_*.md")
     t = mdparse.require_table(path, ["plant_id", "что", "положена"])
     plants = []
@@ -209,7 +257,10 @@ def export_plants(library: Path) -> list[Plant]:
 
 def export_continuity(library: Path) -> list[ContinuityEvent]:
     path = _find_file(library, "33_*.md")
-    t = mdparse.require_table(path, ["дата", "событие"])
+    try:
+        t = mdparse.require_table(path, ["дата", "событие"])
+    except MarkupError:
+        return realcanon.parse_continuity_bullets(path)  # буллеты «факт · т.X гл.Y · статус»
     return [
         ContinuityEvent(
             date=cell(row, "дата"),
@@ -255,13 +306,35 @@ def export_briefs(library: Path) -> list[Brief]:
                 )
             )
     if not briefs:
+        reg = _registry(library)
+        if reg is not None:
+            known = _known_names(library)
+            briefs = realcanon.parse_registry_briefs(reg, known)  # постраничная сетка на весь том
+            for p23 in sorted(library.glob("23_*.md")):
+                realcanon.enrich_from_poglavnik(briefs, p23, known)
+    if not briefs:
         raise MarkupError(library / "23_*.md", 0, "поглавник не найден или в нём нет секций «## Глава N»")
     return briefs
 
 
+def _known_names(library: Path) -> set[str]:
+    """Имена субъектов для распознавания участников сцен и досье."""
+    try:
+        names = {f.subject for f in export_matrix(library)}
+    except MarkupError:
+        names = set()
+    for p03 in sorted(library.glob("03_*.md")):
+        names |= realcanon.focal_names(p03)
+    return {n.split()[0] for n in names if n} | names
+
+
 def export_dossiers(library: Path) -> list[Dossier]:
+    paths = sorted(library.glob("Досье/*.md"))
+    real = [p for p in paths if "# Досье" in p.read_text(encoding="utf-8")[:200]]
+    if real:
+        return realcanon.parse_dossiers_real(real, _known_names(library))
     dossiers = []
-    for path in sorted(library.glob("Досье/*.md")):
+    for path in paths:
         sections = mdparse.parse_sections(path)
         name = next((s.title for s in sections if s.level == 1), path.stem)
         rel: dict[str, str] = {}
@@ -290,6 +363,9 @@ def export_dossiers(library: Path) -> list[Dossier]:
 def export_infobans(library: Path) -> list[InfoBan]:
     matches = sorted(library.glob("2.2_*.md"))
     if not matches:
+        reg = _registry(library)
+        if reg is not None:
+            return realcanon.parse_secrets(reg)  # реестр тайн тома
         return []
     path = matches[0]
     t = mdparse.require_table(path, ["ban_id", "запрет"])

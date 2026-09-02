@@ -45,7 +45,8 @@ def _style_sections(library: Path) -> str:
     sections = mdparse.parse_sections(path)
     wanted: list[str] = []
     for s in sections:
-        m = re.match(r"§\s*(\d+(?:\.\d+)?)", s.title)
+        # «§1. …» (демо) либо «## 1. …» / «## 6.1. …» (реальный регламент)
+        m = re.match(r"(?:§\s*)?(\d+(?:\.\d+)?)\.?\s", s.title + " ")
         if not m:
             continue
         num = m.group(1)
@@ -96,6 +97,7 @@ def chapter_plants(exports_dir: Path, brief: Brief) -> list:
         for p in plants
         if p.plant_id in brief.plants
         or (p.placed.get("vol") == brief.volume and p.placed.get("ch") == brief.chapter)
+        or (p.placed.get("vol") == brief.volume and brief.chapter in p.chapters)
     ]
     return sorted(selected, key=lambda p: p.plant_id)
 
@@ -124,15 +126,36 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
 
     scene_dossiers = sorted((d for d in dossiers if d.name in participants), key=lambda d: d.name)
 
+    # «НЕ знает»: только явные формулировки брифа. Содержание тайн из матрицы
+    # в окно НЕ попадает (FR-C3) — Писатель не должен знать то, чего не знает фокал;
+    # число скрытых фактов сообщается без раскрытия.
+    hidden = sum(
+        1 for f in matrix
+        if f.subject == brief.focal and (f.from_chapter is None or f.from_chapter > chapter)
+    )
+    not_knows = list(brief.not_knows) + (
+        [f"ещё {hidden} факт(ов) матрицы фокалу недоступны — никаких намёков в их сторону"] if hidden else []
+    )
+
     intensifiers = sorted(
         {w for r in stoplists if r.kind == "усилитель" for w in r.items}
     )
 
     # запреты брифа + запреты информрежима 2.2 как явные «НЕ упоминать» (FR-C3)
+    def _ban_active(b) -> bool:
+        if b.until_chapter is not None:  # реестр тайн: до главы раскрытия читателю
+            return brief.chapter < b.until_chapter
+        return b.until_volume is None or brief.volume <= b.until_volume
+
+    def _ban_text(b) -> str:
+        if b.secret:
+            # тайна реестра: содержание Писателю не сообщаем (FR-C3), только факт запрета
+            when = f"читатель узнаёт в гл. {b.until_chapter}" if b.until_chapter else "не раскрывается в этом томе"
+            return f"НЕ раскрывать и не намекать: тайна {b.ban_id} реестра информрежима ({when})"
+        return f"НЕ упоминать (информрежим {b.ban_id}): {b.text}"
+
     bans = list(brief.bans) + [
-        f"НЕ упоминать (информрежим {b.ban_id}): {b.text}"
-        for b in sorted(infobans, key=lambda b: b.ban_id)
-        if b.until_volume is None or brief.volume <= b.until_volume
+        _ban_text(b) for b in sorted(infobans, key=lambda b: b.ban_id) if _ban_active(b)
     ]
 
     env = Environment(undefined=StrictUndefined, trim_blocks=False, lstrip_blocks=False)
@@ -144,6 +167,7 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
         line_rules=_line_rules(stoplists, participants, brief.year),
         dossiers=scene_dossiers,
         known_facts=known,
+        not_knows=not_knows,
         plants=chapter_plants(exports_dir, brief),
         bans=bans,
         intensifiers=intensifiers,

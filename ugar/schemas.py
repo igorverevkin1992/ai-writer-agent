@@ -41,6 +41,7 @@ class Plant(BaseModel):
     plant_id: str
     what: str
     placed: dict  # {vol, ch}
+    chapters: list[int] = Field(default_factory=list)  # все главы, где лежит (реестр §7)
     fires: list[dict] = Field(default_factory=list)  # [{vol, ch?}]
     status: str = ""
 
@@ -97,6 +98,9 @@ class InfoBan(BaseModel):
     ban_id: str
     text: str
     until_volume: int | None = None
+    # реестр тайн: глава, в которой читатель узнаёт (до неё — «НЕ упоминать»)
+    until_chapter: int | None = None
+    secret: bool = False  # текст — содержание тайны: Писателю сообщать нельзя (FR-C3)
 
 
 # --------------------------------------------------------- вердикты и флаги
