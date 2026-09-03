@@ -1,1 +1,19 @@
 library_dir: "УГАР_Библиотека"
+
+# Цены за 1 млн токенов — для оценки стоимости в logs/api.jsonl и «Журнале API» панели (§6.3).
+# Модели — пины автора (Р-016, Д-11); цены по прайс-листам на 03.09.2026, обновляйте при смене тарифов.
+writer:
+  provider: gemini
+  model: gemini-3.1-pro
+  price_in_per_1m: 2.0
+  price_out_per_1m: 12.0
+verifier2:
+  provider: anthropic
+  model: claude-sonnet-4-5
+  price_in_per_1m: 3.0
+  price_out_per_1m: 15.0
+canonist:
+  provider: anthropic
+  model: claude-sonnet-4-5
+  price_in_per_1m: 3.0
+  price_out_per_1m: 15.0
