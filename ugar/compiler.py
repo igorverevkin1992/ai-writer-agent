@@ -90,6 +90,60 @@ def _line_rules(stoplists: list[StopRule], participants: list[str], year: int | 
     return result
 
 
+def ban_active(b, brief: Brief) -> bool:
+    """Запрет информрежима действует для главы? Единый фильтр компилятора и Э2 (FR-C3)."""
+    if b.until_chapter is not None:  # реестр тайн: до главы раскрытия читателю
+        return brief.chapter < b.until_chapter
+    return b.until_volume is None or brief.volume <= b.until_volume
+
+
+_FUTURE_RE = re.compile(r"(?:\bт\.\s*(\d+)|\bтом[аеу]?\s+(\d+)|\bт\.(\d+)[–-]\d+|Ф-19\d\d|Р-\d{3}|\bцикл)", re.IGNORECASE)
+_SENT_SPLIT_RE = re.compile(r"(?<=[.;!?])\s+|\n+")
+
+
+def _safe_sentences(text: str, markers: list[str], volume: int) -> str:
+    """Оставляет только фразы без маркеров незнакомых фокалу тайн и без ссылок на будущие тома (Р-022)."""
+    kept: list[str] = []
+    low_markers = [m.lower() for m in markers if m]
+    for sent in _SENT_SPLIT_RE.split(text):
+        sent = sent.strip()
+        if not sent or sent.lower().startswith("возраст по томам"):
+            continue
+        low = sent.lower()
+        if any(m in low for m in low_markers):
+            continue
+        future = False
+        for m in _FUTURE_RE.finditer(sent):
+            num = next((g for g in m.groups() if g), None)
+            if num is None or int(num) > volume:
+                future = True
+                break
+        if future:
+            continue
+        kept.append(sent)
+    return " ".join(kept)
+
+
+def safe_dossier(d, brief: Brief, infobans: list, participants: list[str]):
+    """Проекция досье для окна (FR-C3, Р-022): без каркаса/арки/статуса, без фраз о тайнах,
+    которых фокал не знает к этой главе, без будущих томов; отношения — только к участникам сцены."""
+    markers: list[str] = []
+    for b in infobans:
+        if b.secret and not b.known_to(brief.focal, brief.chapter):
+            markers.extend(b.markers)
+    relations = {
+        k: _safe_sentences(v, markers, brief.volume)
+        for k, v in d.relations.items()
+        if any(k.lower().startswith(n.lower()) or n.lower().startswith(k.lower()) for n in participants if n != d.name)
+    }
+    return d.model_copy(update={
+        "profile": _safe_sentences(d.profile, markers, brief.volume),
+        "physique": _safe_sentences(d.physique, markers, brief.volume),
+        "speech": _safe_sentences(d.speech, markers, brief.volume),
+        "relations": {k: v for k, v in relations.items() if v},
+    })
+
+
 def chapter_plants(exports_dir: Path, brief: Brief) -> list:
     """Закладки, назначенные главе (FR-C2): по брифу и/или по реестру (placed = том/глава)."""
     plants = exporter.load_plants(exports_dir)
@@ -118,14 +172,19 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
     # «что знает фокал»: только факты с from_chapter ≤ N (FR-C1, FR-C3)
     known = sorted(
         (
-            f
+            # частичное/неверное знание (курсив матрицы) — Писателю показывается текст пометки, не сам факт (FR-C3)
+            f.model_copy(update={"fact": f.note.split(":", 1)[1].strip() + " (знание неполное)"})
+            if f.note.startswith("частично") else f
             for f in matrix
             if f.subject == brief.focal and f.from_chapter is not None and f.from_chapter <= chapter
         ),
         key=lambda f: f.fact_id,
     )
 
-    scene_dossiers = sorted((d for d in dossiers if d.name in participants), key=lambda d: d.name)
+    scene_dossiers = sorted(
+        (safe_dossier(d, brief, infobans, participants) for d in dossiers if d.name in participants),
+        key=lambda d: d.name,
+    )
 
     # «НЕ знает»: только явные формулировки брифа. Содержание тайн из матрицы
     # в окно НЕ попадает (FR-C3) — Писатель не должен знать то, чего не знает фокал;
@@ -143,11 +202,6 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
     )
 
     # запреты брифа + запреты информрежима 2.2 как явные «НЕ упоминать» (FR-C3)
-    def _ban_active(b) -> bool:
-        if b.until_chapter is not None:  # реестр тайн: до главы раскрытия читателю
-            return brief.chapter < b.until_chapter
-        return b.until_volume is None or brief.volume <= b.until_volume
-
     def _ban_text(b) -> str:
         if b.secret:
             # тайна реестра: содержание Писателю не сообщаем (FR-C3), только факт запрета
@@ -156,7 +210,7 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
         return f"НЕ упоминать (информрежим {b.ban_id}): {b.text}"
 
     bans = list(brief.bans) + [
-        _ban_text(b) for b in sorted(infobans, key=lambda b: b.ban_id) if _ban_active(b)
+        _ban_text(b) for b in sorted(infobans, key=lambda b: b.ban_id) if ban_active(b, brief)
     ]
 
     # каркас драматургии (Р-020): только из канона (2.1 → circles.json), не из черновиков

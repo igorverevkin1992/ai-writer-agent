@@ -8,6 +8,7 @@ chapters/N/verify2_prompt.md для ручного прогона (NFR-3).
 from __future__ import annotations
 
 import json
+import re
 from importlib import resources
 from pathlib import Path
 
@@ -54,6 +55,7 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
     matrix_slice = [
         f"- [{f.fact_id}] {f.subject}: {f.fact} "
         + (f"(узнаёт в гл. {f.from_chapter})" if f.from_chapter is not None else "(НЕ знает)")
+        + (f" — {f.note}" if f.note.startswith("частично") else "")
         for f in matrix
         if f.subject in participants
     ]
@@ -77,8 +79,7 @@ def build_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
             *[
                 f"- [{b.ban_id}] {b.text}"
                 for b in infobans
-                # тот же фильтр, что у компилятора: истёкшие запреты — не нарушение
-                if b.until_volume is None or brief.volume <= b.until_volume
+                if compiler.ban_active(b, brief)  # тот же фильтр, что у компилятора: раскрытое — не нарушение
             ],
             "",
             "## Стоп-листы линий (фокализация)",
@@ -105,7 +106,9 @@ def parse_flags(raw: str) -> list[Flag]:
         raise ValueError(f"Ответ Верификатора-2: {e}") from e
     flags = []
     for i, item in enumerate(data, start=1):
-        item.setdefault("flag_id", f"F-{i:03d}")
+        # идентификатор попадает в разметку (id/href): всё, что не [\w.-], заменяется порядковым
+        if not isinstance(item.get("flag_id"), str) or not re.fullmatch(r"[\w.\-]+", item["flag_id"]):
+            item["flag_id"] = f"F-{i:03d}"
         try:
             flags.append(Flag.model_validate(item))
         except ValidationError as e:

@@ -401,5 +401,5 @@ def commit_to_canon(ws: Workspace, cfg: Config, library: Path) -> tuple[Path, st
     n = len(new)
     message = f"[круги истории] внесено кругов: {n} (каркас драматургии, Р-020)"
     if gitops.is_repo(library):
-        return path, gitops.commit_all(library, message, author=cfg.commit_author)
+        return path, gitops.commit_all(library, message, author=cfg.commit_author) or "(изменений в каноне нет)"
     return path, "(библиотека не под git — коммит пропущен, настройте git!)"

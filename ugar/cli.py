@@ -246,6 +246,7 @@ def cmd_review(chapter: int) -> None:
     from . import htmlreview
 
     html_path = htmlreview.build_review_html(ws, chapter, st.draft)
+    st.data["база_приёмки"] = st.draft  # FR-E3: каждый цикл правок стартует от текста, принятого на приёмке
     st.transition("на-приёмке", "review")
     typer.secho(f"Пакет приёмки: {path}", fg=typer.colors.GREEN)
     typer.secho(f"Чтение с флагами (браузер): {html_path}", fg=typer.colors.GREEN)
@@ -272,20 +273,21 @@ def cmd_apply_edits(
             f"`ugar apply-edits {chapter} --manual`, затем `ugar diff-check {chapter} --авторская-правка`."
         )
     edits = review_mod.parse_edits_md(ws, chapter)
-    st.data["база_правок"] = st.draft
+    # база правок — черновик приёмки (FR-E3): повторный цикл не наследует самоволия прошлой итерации
+    base = int(st.data.get("база_приёмки", st.draft))
+    st.data["база_правок"] = base
+    new_k = st.draft + 1
     if manual:
         # завершение сорвавшейся автоматической итерации либо ручная правка автора —
         # бюджет итераций FR-E3 (для циклов Писателя) не расходуется
-        new_k = st.draft + 1
         if not ws.draft_path(chapter, new_k).exists():
             _fail(f"нет файла {ws.draft_path(chapter, new_k)} (ручной режим).")
     elif not edits:
-        # правок нет — черновик переходит дальше без вызова Писателя
-        new_k = st.draft + 1
-        shutil.copyfile(ws.draft_path(chapter, st.draft), ws.draft_path(chapter, new_k))
+        # правок нет — черновик приёмки переходит дальше без вызова Писателя
+        shutil.copyfile(ws.draft_path(chapter, base), ws.draft_path(chapter, new_k))
     else:
         try:
-            new_k = writer.apply_edits(ws, cfg, chapter, st.draft, edits)
+            new_k = writer.apply_edits(ws, cfg, chapter, base, edits, new_k=new_k)
         except adapters.ManualModeNeeded as e:
             typer.echo(
                 f"Промпт правок сохранён: chapters/{chapter:03d}/apply_edits_prompt.md — прогоните вручную, "
@@ -392,6 +394,7 @@ def cmd_canonize(
     ):
         raise typer.Exit()
     commit = canonist.apply_batch(ws, cfg, lib, chapter, st.draft)
+    st.data["коммит_приёмки"] = commit  # откат зафиксированной главы — строго по этому SHA
     st.transition("зафиксировано", "canonize --apply")
     typer.secho(f"Глава {chapter} зафиксирована. Коммит: {commit}", fg=typer.colors.GREEN)
 
@@ -825,18 +828,26 @@ def cmd_rollback(
     st = ChapterState(ws, chapter)
     if st.state == "зафиксировано":
         # только git-revert коммита приёмки с пересчётом выгрузок и корпуса
-        sha = gitops.find_chapter_commit(lib, chapter)
+        sha = st.data.get("коммит_приёмки") or gitops.find_chapter_commit(lib, chapter)
         if not sha:
             _fail(f"не найден коммит приёмки главы {chapter} в библиотеке.")
         if not yes and not typer.confirm(f"git revert {sha[:10]} (приёмка главы {chapter}) и пересчёт выгрузок? (y)"):
             raise typer.Exit()
-        gitops.revert(lib, sha)
-        exporter.run_export(lib, ws.exports, ws.logs)
+        try:
+            gitops.revert(lib, sha)
+        except RuntimeError as e:
+            _fail(f"откат не выполнен: {e}")
+        # состояние — сразу после успешного реверта, чтобы повторный откат не «ревертил реверт»
         st.data["состояние"] = "принято"
+        st.data.pop("коммит_приёмки", None)
         st.data["история"].append(
             {"из": "зафиксировано", "в": "принято", "время": datetime.now(timezone.utc).isoformat(), "команда": "rollback (git revert)"}
         )
         st._save()
+        try:
+            exporter.run_export(lib, ws.exports, ws.logs)
+        except MarkupError as e:
+            typer.secho(f"⚠ Откат выполнен, но выгрузки не пересчитаны: {e}. Поправьте канон и `ugar export`.", fg=typer.colors.YELLOW)
         if to != "принято":
             st.rollback(to)
         typer.secho(f"Откат выполнен: глава {chapter} → «{st.state}», выгрузки и корпус пересчитаны.", fg=typer.colors.GREEN)

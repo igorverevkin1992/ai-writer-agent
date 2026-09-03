@@ -66,7 +66,7 @@ def _highlight(text_html: str, quote: str, cls: str, anchor: str, tooltip: str) 
     q = _esc(quote.strip())
     if not q or q not in text_html:
         return text_html
-    mark = f'<mark id="{anchor}" class="m-{cls}" title="{html.escape(tooltip)}">{q}</mark>'
+    mark = f'<mark id="{html.escape(anchor, quote=True)}" class="m-{html.escape(cls, quote=True)}" title="{html.escape(tooltip, quote=True)}">{q}</mark>'
     return text_html.replace(q, mark, 1)
 
 
@@ -115,7 +115,7 @@ def build_review_html(ws: Workspace, chapter: int, draft: int) -> Path:
         decision = ""
         if f.kind == "samovolka":
             if res and res.decision:
-                target = f" → {res.target_registry}" if res.target_registry else ""
+                target = f" → {_esc(res.target_registry)}" if res.target_registry else ""
                 decision = f'<div class="resolved">решение: {res.decision}{target}</div>'
             else:
                 decision = f'<div class="unresolved">БЕЗ РЕШЕНИЯ — ugar resolve {chapter} {f.flag_id} …</div>'
@@ -124,7 +124,7 @@ def build_review_html(ws: Workspace, chapter: int, draft: int) -> Path:
         return (
             f'<div class="card"><span class="badge b-{f.kind}">{badge}</span> '
             f"<strong>{_esc(f.flag_id)}</strong>{type_part} "
-            f'<a class="anchor" href="#a-{f.flag_id}">¶</a>'
+            f'<a class="anchor" href="#a-{html.escape(f.flag_id, quote=True)}">¶</a>'
             f"<blockquote>{_esc(f.quote)}</blockquote>"
             f'<div class="rule">{_esc(f.rule)}. {_esc(f.recommendation)}</div>{decision}</div>'
         )

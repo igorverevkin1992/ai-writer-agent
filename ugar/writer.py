@@ -47,11 +47,11 @@ def edit_prompt(ws: Workspace, chapter: int, draft_k: int, edits: list[Edit]) ->
     return env.from_string(tpl).render(edits=edits, draft=draft)
 
 
-def apply_edits(ws: Workspace, cfg: Config, chapter: int, draft_k: int, edits: list[Edit]) -> int:
-    """Вызов Писателя в режиме правок; возвращает номер нового черновика."""
+def apply_edits(ws: Workspace, cfg: Config, chapter: int, draft_k: int, edits: list[Edit], new_k: int | None = None) -> int:
+    """Вызов Писателя в режиме правок от черновика draft_k (база приёмки, FR-E3); возвращает номер нового черновика."""
     prompt = edit_prompt(ws, chapter, draft_k, edits)
     guard.write_text(ws.chapter_dir(chapter) / "apply_edits_prompt.md", prompt)
     text = adapters.call_gemini(prompt, cfg.writer, cfg.api, ws.logs, chapter=chapter)
-    new_k = draft_k + 1
+    new_k = new_k or draft_k + 1
     _save_draft(ws, chapter, new_k, text, cfg, mode="правки")
     return new_k

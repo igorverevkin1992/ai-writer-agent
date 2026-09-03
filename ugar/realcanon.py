@@ -284,12 +284,15 @@ def parse_wide_matrix(path: Path) -> list[MatrixFact]:
                 raw = row.get(subj, "").strip()
                 if not raw:
                     continue
-                partial = raw.startswith("*") and raw.endswith("*")
+                # курсив *…* = частичное/неверное знание; жирный **…** — просто выделение
+                partial = raw.startswith("*") and raw.endswith("*") and not raw.startswith("**")
                 clean = raw.strip("*").strip()
                 if clean in ("—", "-", ""):
                     from_ch: int | None = None
                 elif clean.lower().startswith("всегда") or clean.lower().startswith("пролог"):
                     from_ch = 0
+                elif subj == "Читатель":
+                    from_ch = reveal_chapter(clean)  # «улики с гл.4; расчётная разгадка ≈гл.20» → 20
                 else:
                     chm = CH_RE.search(clean)
                     from_ch = int(chm.group(1)) if chm else None
@@ -370,9 +373,94 @@ def parse_continuity_bullets(path: Path) -> list[ContinuityEvent]:
 # ------------------------------------------------------ информрежим (тайны)
 
 
-def parse_secrets(path: Path) -> list[InfoBan]:
-    """Реестр тайн: тайна → «НЕ упоминать» до главы, где читатель узнаёт."""
+def reveal_chapter(text: str) -> int | None:
+    """Глава раскрытия читателю из ячейки: «гл. 32», «расчётная разгадка ≈гл.20» (число после «разгадк»);
+    «улики с гл. 4» без разгадки — не раскрытие (None)."""
+    m = re.search(r"разгадк[а-я]*\D{0,25}?гл\.?\s*(\d+)", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    if re.search(r"улик", text, re.IGNORECASE):
+        return None
+    m = CH_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def _match_matrix_fact(secret: str, matrix: list[MatrixFact]) -> str | None:
+    """fact_id факта матрицы 3.1 с наибольшим совпадением слов с текстом тайны."""
+    def words(t: str) -> set[str]:
+        return {w for w in re.findall(r"[а-яё]{4,}", t.lower()) if w not in {"года", "полная", "картина", "слой"}}
+    target = words(secret)
+    best, score = None, 0
+    for f in matrix:
+        if f.subject != "Читатель":
+            continue
+        n = len(target & words(f.fact))
+        if n > score:
+            best, score = f, n
+    if best is None or score < min(2, len(target)):
+        return None
+    return best.fact_id
+
+
+def _matrix_knowledge(fact_id: str, matrix: list[MatrixFact]) -> tuple[int | None, dict[str, int]]:
+    """(глава раскрытия читателю, {персонаж: глава полного знания}) по строке матрицы."""
+    reader: int | None = None
+    known: dict[str, int] = {}
+    for f in matrix:
+        if f.fact_id != fact_id or f.from_chapter is None:
+            continue
+        if f.subject == "Читатель":
+            reader = f.from_chapter
+        elif not f.note.startswith("частично"):
+            known[f.subject] = f.from_chapter
+    return reader, known
+
+
+def _parse_known_by(text: str, known_names: set[str]) -> dict[str, int]:
+    """«Лемм, Штерн; больше никто», «Степан, куратор ОГПУ; Штерн — с гл. 7; Лемм — с гл. 17»,
+    «Лемм; Заварзин узнает в томе 3» → {имя: глава}. Без главы — 0 (знает всегда)."""
+    known: dict[str, int] = {}
+    for chunk in re.split(r"[;,]", text):
+        chunk = chunk.strip()
+        if not chunk or re.search(r"\b(никто|не узнает|не узнаёт)\b", chunk, re.IGNORECASE):
+            continue
+        if re.search(r"в томе\s*\d+", chunk, re.IGNORECASE):
+            continue  # узнаёт в другом томе — в этом не знает
+        name = normalize_name(re.sub(r"^(только|больше)\s+", "", chunk, flags=re.IGNORECASE), known_names)
+        if name not in known_names:
+            continue
+        chm = CH_RE.search(chunk)
+        known[name] = int(chm.group(1)) if chm else 0
+    return known
+
+
+def _merge_known(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
+    out = dict(a)
+    for name, ch in b.items():
+        out[name] = min(out[name], ch) if name in out else ch
+    return out
+
+
+def parse_secret_markers(path: Path) -> dict[str, list[str]]:
+    """Таблица «Маркеры фильтра окна» (Р-022): | Т-№ | Маркеры | → {Т-01: [слова…]}."""
+    markers: dict[str, list[str]] = {}
+    for table in mdparse.parse_tables(path):
+        if not any("Маркер" in h for h in table.headers):
+            continue
+        for row in table.rows:
+            key = next((v.strip() for h, v in row.items() if h.startswith("Т")), "")
+            raw = next((v for h, v in row.items() if "Маркер" in h), "")
+            if key:
+                markers[key] = [m.strip().strip("«»") for m in raw.split(";") if m.strip()]
+    return markers
+
+
+def parse_secrets(path: Path, known_names: set[str] | None = None, matrix: list[MatrixFact] | None = None) -> list[InfoBan]:
+    """Реестр тайн: тайна → «НЕ упоминать» до главы, где читатель узнаёт; кто из персонажей знает (FR-C3)."""
     _, volume = registry_year_volume(path)
+    known_names = known_names or set()
+    parts = parse_parts(path)
+    markers = parse_secret_markers(path)
     bans: list[InfoBan] = []
     for table in mdparse.parse_tables(path):
         headers = " ".join(table.headers).lower()
@@ -380,20 +468,37 @@ def parse_secrets(path: Path) -> list[InfoBan]:
             continue
         for i, row in enumerate(table.rows, start=1):
             reveal = cell(row, "узнаёт")
-            chm = CH_RE.search(reveal)
-            if chm:
-                until_ch: int | None = int(chm.group(1))
+            secret_text = cell(row, "Тайна")
+            # знание персонажей — из реестра И из матрицы 3.1 (в реестре список часто неполон)
+            matrix_reader, matrix_known = None, {}
+            fid = _match_matrix_fact(secret_text, matrix) if matrix else None
+            if fid:
+                matrix_reader, matrix_known = _matrix_knowledge(fid, matrix)
+            if re.search(r"НЕ раскрыва", reveal):
+                until_ch: int | None = None
             elif re.search(r"[Пп]ролог", reveal):
                 until_ch = 0
             else:
-                until_ch = None  # не раскрывается в томе — бан на весь том
+                until_ch = reveal_chapter(reveal)
+                if until_ch is None and matrix_reader is not None:
+                    until_ch = matrix_reader
+                if until_ch is None:
+                    pm = re.search(r"[Чч]аст[ьи]\s+([IVX\d]+)", reveal)
+                    if pm:
+                        num = ROMAN.get(pm.group(1), int(pm.group(1)) if pm.group(1).isdigit() else 0)
+                        part = next((p for p in parts if p["part"] == num), None)
+                        if part:
+                            until_ch = part["to_chapter"]  # до конца части — безопасная граница
+            ban_id = f"Т-{i:02d}"
             bans.append(
                 InfoBan(
-                    ban_id=f"Т-{i:02d}",
-                    text=cell(row, "Тайна"),
-                    until_volume=None if chm or until_ch == 0 else volume + 1,
+                    ban_id=ban_id,
+                    text=secret_text,
+                    until_volume=None if until_ch is not None else volume + 1,
                     until_chapter=until_ch,
                     secret=True,
+                    known_by=_merge_known(_parse_known_by(cell(row, "знают"), known_names), matrix_known),
+                    markers=markers.get(ban_id, []),
                 )
             )
     return bans

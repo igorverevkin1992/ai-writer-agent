@@ -101,6 +101,13 @@ class InfoBan(BaseModel):
     # реестр тайн: глава, в которой читатель узнаёт (до неё — «НЕ упоминать»)
     until_chapter: int | None = None
     secret: bool = False  # текст — содержание тайны: Писателю сообщать нельзя (FR-C3)
+    # кто из персонажей знает тайну и с какой главы (0 = всегда) — колонка «Персонажи знают»
+    known_by: dict[str, int] = Field(default_factory=dict)
+    # маркеры фильтра окна: фразы досье с этими словами вычищаются, пока фокал тайну не знает
+    markers: list[str] = Field(default_factory=list)
+
+    def known_to(self, name: str, chapter: int) -> bool:
+        return name in self.known_by and self.known_by[name] <= chapter
 
 
 # --------------------------------------------------------- вердикты и флаги
@@ -175,7 +182,7 @@ class Verdict(BaseModel):
 class Flag(BaseModel):
     """Флаг Э2 (FR-V2.2). kind=samovolka требует решения автора."""
 
-    flag_id: str
+    flag_id: str = Field(pattern=r"^[\w.\-]+$")  # попадает в id/href разметки — только безопасные символы
     type: str
     severity: Literal["критично", "важно", "мелочь"] = "важно"
     quote: str
@@ -187,9 +194,9 @@ class Flag(BaseModel):
 class Resolution(BaseModel):
     """Решение автора по самоволке (FR-V2.5)."""
 
-    flag_id: str
+    flag_id: str = Field(pattern=r"^[\w.\-]+$")
     decision: Literal["вычеркнуть", "канонизировать"] | None = None
-    target_registry: str | None = None
+    target_registry: str | None = Field(default=None, pattern=r"^[\w.\-]+$")
 
 
 # ------------------------------------------------------------------- правки

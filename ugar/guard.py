@@ -11,7 +11,8 @@ import contextlib
 import threading
 from pathlib import Path
 
-_state = threading.local()
+_state = threading.local()  # только флаг сессии записи (на поток)
+_library_dir: Path | None = None  # путь библиотеки — общий для всех потоков процесса (панель, задачи)
 
 
 class CanonWriteError(PermissionError):
@@ -19,11 +20,12 @@ class CanonWriteError(PermissionError):
 
 
 def set_library_dir(path: Path) -> None:
-    _state.library = path.resolve()
+    global _library_dir
+    _library_dir = path.resolve()
 
 
 def _library() -> Path | None:
-    return getattr(_state, "library", None)
+    return _library_dir
 
 
 def _allowed() -> bool:

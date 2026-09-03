@@ -371,7 +371,8 @@ def export_infobans(library: Path) -> list[InfoBan]:
     if not matches:
         reg = _registry(library)
         if reg is not None:
-            return realcanon.parse_secrets(reg)  # реестр тайн тома
+            # реестр тайн тома: глава раскрытия — из ячейки либо из матрицы 3.1 («Читатель»)
+            return realcanon.parse_secrets(reg, _known_names(library), export_matrix(library))
         return []
     path = matches[0]
     t = mdparse.require_table(path, ["ban_id", "запрет"])

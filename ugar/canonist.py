@@ -256,8 +256,11 @@ def apply_batch(ws: Workspace, cfg: Config, library: Path, chapter: int, draft: 
         f"канонизировано самоволок {n_sam} (конвейер, Р-016)"
     )
     if gitops.is_repo(library):
-        return gitops.commit_all(library, message, author=cfg.commit_author)
-    return "(библиотека не под git — коммит пропущен, настройте git!)"
+        commit = gitops.commit_all(library, message, author=cfg.commit_author)
+        if commit is None:
+            raise RuntimeError("после записи пакета в библиотеке нет изменений — коммит приёмки не создан (проверьте пакет).")
+        return commit
+    raise RuntimeError("библиотека не под git — без коммита приёмки откат невозможен (FR-K2): инициализируйте репозиторий.")
 
 
 def _update_plants_status(ws: Workspace, library: Path, chapter: int) -> None:

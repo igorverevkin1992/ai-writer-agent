@@ -169,7 +169,8 @@ function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; 
     const wrap = (quote: string, cls: string, id: string, title: string) => {
       const q = esc(quote.trim());
       if (q && h.includes(q) && !h.includes(`id="${id}"`)) {
-        h = h.replace(q, `<mark id="${id}" class="m-${cls}" title="${esc(title).replace(/"/g, "&quot;")}">${q}</mark>`);
+        const safeId = esc(id).replace(/"/g, "&quot;");
+        h = h.replace(q, () => `<mark id="${safeId}" class="m-${cls}" title="${esc(title).replace(/"/g, "&quot;")}">${q}</mark>`);
       }
     };
     for (const c of d.verdict?.checks ?? []) {
