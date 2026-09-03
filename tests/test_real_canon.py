@@ -76,8 +76,11 @@ def test_матрица_закладки_тайны_досье(real):
     assert not any("картотека" in p.what and p.plant_id.startswith("П-") for p in plants)  # дедуп с §7
 
     bans = exporter.load_infobans(real.exports)
-    assert len(bans) == 10 and all(b.secret for b in bans)
+    secrets = [b for b in bans if b.secret]
+    assert len(secrets) == 10
     assert next(b for b in bans if "сын Лемма" in b.text).until_chapter == 46
+    # §7 «НЕ упоминается в томе 1» — открытый запрет на весь том, не тайна (аудит 1.5)
+    assert [(b.ban_id, b.until_volume) for b in bans if not b.secret] == [("З-07", 1)]
 
     names = sorted(d.name for d in exporter.load_dossiers(real.exports))
     assert names == ["Ася", "Бугаев", "Заварзин", "Ковров", "Лемм", "Мередит", "Ольга", "Ремез", "Степан", "Штерн"]
@@ -112,14 +115,17 @@ def test_окно_главы_5_эквивалентно_эталону(real):
 
 
 def test_калибровка_реального_макета(real):
-    """10.1: ожидаемые ТЗ ≈592 слова, средняя ≈7,2 (±0,2), ≤6 ≈51%, «был» 2 — замер на файле макета."""
+    """10.1: ожидаемые ТЗ ≈592 слова, средняя ≈7,2 (±0,2), ≤6 ≈51%, «был» 2 — замер на файле макета.
+
+    Замер после правки сплиттера (этап 3 аудита, Д-2): 605 слов, 83 предложения, средняя 7,29,
+    ≤6 слов — 47% (до правки инициалы «А. К. Штерн.» давали три лишних предложения: 85, 7,12)."""
     raw = (LIBRARY / "Проза/Том1_Глава04_МАКЕТ.md").read_text(encoding="utf-8")
     text = textutils.narrator_text(raw)
     lens = textutils.sentence_lengths(text)
     tokens = textutils.normalize(text)
     avg = sum(lens) / len(lens)
     assert 585 <= len(tokens) <= 620
-    assert abs(avg - 7.2) <= 0.2
+    assert abs(avg - 7.2) <= 0.2 and abs(avg - 7.29) < 0.01 and len(lens) == 83
     assert 0.45 <= sum(1 for x in lens if x <= 6) / len(lens) <= 0.53
     assert sum(1 for t in tokens if t in {"был", "было"}) == 4  # был 1 + было 3 (файл макета v2)
     assert "Статус: на приёмке" not in text  # заголовки-метаданные исключены
@@ -132,7 +138,8 @@ def test_э1_по_принятой_главе_5(real):
     compiler.compile_window(real, LIBRARY, 5)
     verdict = verifier1.run_verify1(real, 5, 1)
     by_id = {c.check_id: c for c in verdict.checks}
-    assert by_id["V1.2a_средняя_длина"].status == "BRAK"       # 5,8 < 7 — телеграф по Р-015
+    assert by_id["V1.2a_средняя_длина"].status == "BRAK"       # 6,2 < 7 — телеграф по Р-015
+    assert by_id["V1.2a_средняя_длина"].actual == "6.2"        # абзацы по Д-2 (до этапа 3 аудита: 5,78)
     assert by_id["V1.4_усилители"].status == "FLAG"            # «предельно ясно» и др.
     assert by_id["V1.5_стоп_лексика"].status == "PASS"
     assert by_id["V1.6_утечка_окна"].status == "PASS"

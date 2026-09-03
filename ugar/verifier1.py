@@ -70,28 +70,82 @@ def _stoplist_applies(rule: StopRule, brief: Brief) -> bool:
     return True
 
 
+# --- стоп-лексика по основам слов (FR-V1.5, аудит 3.3): «отца», «сыну» ловятся стоп-словами «отец», «сын»
+# окончания, отбрасываемые у элемента стоп-листа, чтобы получить основу
+_STEM_ENDINGS = (
+    "ый", "ий", "ой", "ая", "яя", "ое", "ее", "ые", "ие", "ом", "ем", "ам", "ям", "ах", "ях", "ов", "ев", "ей", "ью",
+    "а", "я", "о", "е", "ы", "и", "у", "ю",
+)
+# окончания словоформ, допустимые после основы в тексте (падеж, число, род)
+_INFLECTIONS = (
+    "ами|ями|ого|его|ому|ему|ыми|ими|ый|ий|ой|ей|ая|яя|ое|ее|ые|ие|ым|им|ых|их|ую|юю"
+    "|ом|ем|ам|ям|ах|ях|ов|ев|ою|ею|ью|а|я|о|е|ы|и|у|ю"
+)
+MIN_STEM = 3  # короче — не основа (иначе «сын» → «с»)
+_FLEETING_RE = re.compile(r"^(.+[^аеиоуыэюя])[ео]([йцкнлрхв])$")  # беглая гласная: отец → отц
+
+
+def word_stems(word: str) -> list[str]:
+    """Основы слова: «отец» → [«отец», «отц»], «семья» → [«семь»], «сын» → [«сын»]."""
+    w = word.lower().replace("ё", "е")
+    stem = w
+    for end in sorted(_STEM_ENDINGS, key=len, reverse=True):
+        if w.endswith(end) and len(w) - len(end) >= MIN_STEM:
+            stem = w[: -len(end)]
+            break
+    stems = [stem]
+    m = _FLEETING_RE.match(stem)
+    if m and len(m.group(1)) + 1 >= MIN_STEM:
+        stems.append(m.group(1) + m.group(2))
+    return stems
+
+
+def item_pattern(item: str) -> re.Pattern:
+    """Регэксп элемента стоп-листа в нормализованном тексте (нижний регистр, ё→е):
+    одно слово — сама словоформа либо основа + окончание; оборот из нескольких слов — дословно."""
+    needle = item.lower().replace("ё", "е").strip()
+    if len(needle.split()) > 1:
+        return re.compile(r"(?<![а-яa-z])" + re.escape(needle) + r"(?![а-яa-z])")
+    alts = [re.escape(needle)]
+    for stem in word_stems(needle):
+        # основа на «ь» («семь» от «семья») без окончания — другое слово, окончание обязательно
+        alts.append(re.escape(stem) + (f"(?:{_INFLECTIONS})" if stem.endswith("ь") else f"(?:{_INFLECTIONS})?"))
+    return re.compile(r"(?<![а-яa-z])(?:" + "|".join(alts) + r")(?![а-яa-z])")
+
+
 def _find_items(text: str, items: list[str]) -> list[str]:
-    found = []
     low = text.lower().replace("ё", "е")
-    for item in items:
-        needle = item.lower().replace("ё", "е")
-        if re.search(r"(?<![а-яa-z])" + re.escape(needle) + r"(?![а-яa-z])", low):
-            found.append(item)
-    return found
+    return [item for item in items if item_pattern(item).search(low)]
 
 
 def _quote_sentences(sentences: list[str], items: set[str]) -> list[str]:
-    """Предложения-цитаты, содержащие любой из элементов (слово или оборот)."""
-    needles = {i.lower().replace("ё", "е") for i in items}
+    """Предложения-цитаты, содержащие любой из элементов (слово в любой форме или оборот)."""
+    patterns = [item_pattern(i) for i in items]
     quotes = []
     for s in sentences:
         low = s.lower().replace("ё", "е")
-        toks = set(textutils.normalize(s))
-        if any(n in toks or (" " in n and n in low) for n in needles):
+        if any(p.search(low) for p in patterns):
             quotes.append(s)
         if len(quotes) >= MAX_QUOTES:
             break
     return quotes
+
+
+_CORPUS_STEM_RE = re.compile(r"Том0*(\d+)_Глава0*(\d+)")
+
+
+def corpus_scope(corpus_dir: Path, volume: int, part_range: tuple[int, int] | None) -> list[Path]:
+    """Файлы корпуса для TTR-окна (аудит 3.7): том брифа и, если известна часть, её главы;
+    файлы без номера тома/главы в имени не отсеиваются."""
+    files: list[Path] = []
+    for f in sorted(corpus_dir.glob("*.txt")):
+        m = _CORPUS_STEM_RE.search(f.stem)
+        if m is not None:
+            vol, ch = int(m.group(1)), int(m.group(2))
+            if vol != volume or (part_range and not part_range[0] <= ch <= part_range[1]):
+                continue
+        files.append(f)
+    return files
 
 
 def _matching_runs(text_tokens: list[str], target_ngrams: set[tuple], n: int) -> list[str]:
@@ -130,6 +184,7 @@ def run_verify1(ws: Workspace, chapter: int, draft: int) -> Verdict:
         corpus_dir=ws.corpus,
         own_stem=own.stem if own else None,
         extra_abbr=ws.root / "сокращения.txt",  # пополняемый словарь (Д-2)
+        part_range=part_range_for(ws.exports, chapter),
     )
     verdict = Verdict(chapter=chapter, draft=draft, checks=checks)
     guard.write_text(
@@ -137,6 +192,18 @@ def run_verify1(ws: Workspace, chapter: int, draft: int) -> Verdict:
         json.dumps(verdict.model_dump(), ensure_ascii=False, indent=2) + "\n",
     )
     return verdict
+
+
+def part_range_for(exports_dir: Path, chapter: int) -> tuple[int, int] | None:
+    """Главы части (акта) реестра, в которую входит глава — границы корпуса для TTR-окна."""
+    try:
+        parts = exporter.load_parts(exports_dir)
+    except FileNotFoundError:
+        return None
+    for p in parts:
+        if p["from_chapter"] <= chapter <= p["to_chapter"]:
+            return (p["from_chapter"], p["to_chapter"])
+    return None
 
 
 def analyze(
@@ -149,8 +216,11 @@ def analyze(
     corpus_dir: Path | None = None,
     own_stem: str | None = None,
     extra_abbr: Path | None = None,
+    part_range: tuple[int, int] | None = None,
 ) -> list[CheckResult]:
-    """Чистое ядро Э1: текст + контекст → список результатов проверок."""
+    """Чистое ядро Э1: текст + контекст → список результатов проверок.
+
+    part_range — главы части, по корпусу которой считается TTR-окно (без него — весь том)."""
     text = textutils.narrator_text(raw)
     sentences = textutils.split_sentences(text, extra_abbr)
     lengths = [len(textutils.words(s)) for s in sentences if textutils.words(s)]
@@ -201,7 +271,8 @@ def analyze(
             )
         )
 
-    # FR-V1.3 — плотность «был/было/были»
+    # FR-V1.3 — плотность «был/было/были». Формы намеренно зашиты: канон (02 §5) задаёт норму
+    # словами «был/было», перечень форм — решение канона, не порог; не менять без Р-№ (аудит 3.7).
     byl_forms = {"был", "было", "были", "была"}
     byl_count = sum(1 for t in tokens if t in byl_forms)
     add(
@@ -305,16 +376,20 @@ def analyze(
         )
     )
     win_size = int(_norm_value(norms, "ttr_окно_слов"))
+    # корпус окна — принятые главы тома брифа (и части, если она известна), не весь corpus/ (аудит 3.7)
     part_tokens: list[str] = []
+    scope_files: list[str] = []
     if corpus_dir is not None and corpus_dir.exists():
-        for f in sorted(corpus_dir.glob("*.txt")):
+        for f in corpus_scope(corpus_dir, brief.volume, part_range):
             if own_stem and f.stem == own_stem:
                 continue
+            scope_files.append(f.stem)
             part_tokens.extend(f.read_text(encoding="utf-8").split())
     part_tokens.extend(tokens)
     rolling = textutils.rolling_ttr(part_tokens, win_size)
     min_ttr = min((v for _, v in rolling), default=None)
     ttr_norm = norms["ttr_мин"]
+    scope_note = f"том {brief.volume}" + (f", гл. {part_range[0]}–{part_range[1]}" if part_range else "")
     checks.append(
         CheckResult(
             check_id="V1.8b_ttr_окно",
@@ -324,6 +399,7 @@ def analyze(
             threshold=f"мин {ttr_norm.min:g} в окне {win_size} слов",
             actual=f"{min_ttr:.3f}" if min_ttr is not None else f"часть короче {win_size} слов — не считается",
             rule_source=ttr_norm.source,
+            note=f"корпус: {scope_note}" + (f" ({', '.join(scope_files)})" if scope_files else " (корпус пуст)"),
         )
     )
 

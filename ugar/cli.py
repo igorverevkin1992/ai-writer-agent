@@ -576,10 +576,15 @@ def cmd_check(
     ws, cfg, lib = _ctx()
     from .schemas import Brief
 
+    own = None
+    part_range = None
     if chapter is not None:
         brief = exporter.load_brief(ws.exports, chapter)
         window_path = ws.window_path(chapter)
         window = window_path.read_text(encoding="utf-8") if window_path.exists() else ""
+        # принятая глава уже лежит в корпусе — не сравнивать текст с самим собой (аудит 3.4)
+        own = exporter.find_corpus_file(ws.corpus, chapter, brief.volume)
+        part_range = verifier1.part_range_for(ws.exports, chapter)
     else:
         brief = Brief(chapter=0, focal=focal, year=year, volume_words=volume_words)
         window = ""
@@ -590,7 +595,9 @@ def cmd_check(
         exporter.load_norms(ws.exports),
         exporter.load_stoplists(ws.exports),
         corpus_dir=ws.corpus,
+        own_stem=own.stem if own else None,
         extra_abbr=ws.root / "сокращения.txt",
+        part_range=part_range,
     )
     from .schemas import Verdict
 
