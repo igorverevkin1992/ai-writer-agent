@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "./api";
-import type { Notify } from "./App";
+import type { Notify, RunCommand } from "./App";
+import type { Confirm } from "./Confirm";
+import { usePending } from "./hooks";
 
 interface Step { n: number; name: string; text: string; chapters?: string }
 interface Circle { scope: string; key: number | null; title: string; steps: Step[]; weak_spot?: string; summary?: string; generated?: string }
@@ -25,15 +27,19 @@ function stemOf(c: Circle): string {
 
 export function Circles(props: {
   busy: boolean;
-  runCommand: (cmd: string, chapter?: number, params?: Record<string, unknown>) => Promise<void>;
+  runCommand: RunCommand;
   notify: Notify;
+  confirm: Confirm;
   refreshTick: number;
+  chapterCount: number; // число глав из реестра (state.briefs), а не константа
 }) {
-  const { busy, runCommand, notify, refreshTick } = props;
+  const { busy: jobBusy, runCommand, notify, confirm, refreshTick, chapterCount } = props;
   const [data, setData] = useState<CirclesData | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [manualStem, setManualStem] = useState<string>("");
   const [pasted, setPasted] = useState("");
+  const [pending, run] = usePending();
+  const busy = jobBusy || pending;
 
   const load = useCallback(() => {
     apiGet<CirclesData>("/api/circles").then(setData).catch((e) => notify(String(e)));
@@ -43,45 +49,50 @@ export function Circles(props: {
   if (!data) return <p>Загрузка…</p>;
 
   const nActs = data.acts.length;
-  const generate = async (scope: string, redo = false) => {
-    const count = scope === "книга" ? 1 : scope === "акты" ? nActs : scope === "главы" ? 46 : 1 + nActs + 46;
-    if (!window.confirm(`Построить круги истории: ${scope} (${count} вызов(ов) модели${redo ? ", с пересчётом" : ""})?`)) return;
-    await runCommand("story-circles", undefined, { scope, redo });
-  };
+  const generate = (scope: string, redo = false) =>
+    run(async () => {
+      const count = scope === "книга" ? 1 : scope === "акты" ? nActs : scope === "главы" ? chapterCount : 1 + nActs + chapterCount;
+      if (!(await confirm(`Построить круги истории: ${scope} (${count} вызов(ов) модели${redo ? ", с пересчётом" : ""})?`))) return;
+      await runCommand("story-circles", undefined, { scope, redo });
+    });
 
-  const pending = Object.values(data.canon_status).filter((s) => s !== "в каноне").length;
+  const pendingCanon = Object.values(data.canon_status).filter((s) => s !== "в каноне").length;
 
-  const toCanon = async () => {
-    if (!window.confirm(
-      `Внести ${data.circles.length} круг(ов) в документ 2.1 библиотеки (21_Круги_истории_Том1.md) и закоммитить канон? ` +
-      "После этого окна глав получат секцию «Драматургия», а Э2 — проверку 4.4. (Д-8)"
-    )) return;
-    await runCommand("circles-canon");
-  };
+  const toCanon = () =>
+    run(async () => {
+      const ok = await confirm(
+        `Внести ${data.circles.length} круг(ов) в документ 2.1 библиотеки (21_Круги_истории_Том1.md) и закоммитить канон? ` +
+        "После этого окна глав получат секцию «Драматургия», а Э2 — проверку 4.4. (Д-8)",
+      );
+      if (!ok) return;
+      await runCommand("circles-canon");
+    });
 
-  const copyPrompt = async (stem: string) => {
-    try {
-      const r = await apiGet<{ text: string }>(`/api/circles/prompt/${stem}`);
-      await navigator.clipboard.writeText(r.text);
-      notify(`Промпт «${stem}» скопирован — вставьте ответ модели ниже.`, "ok");
-      setManualStem(stem);
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const copyPrompt = (stem: string) =>
+    run(async () => {
+      try {
+        const r = await apiGet<{ text: string }>(`/api/circles/prompt/${stem}`);
+        await navigator.clipboard.writeText(r.text);
+        notify(`Промпт «${stem}» скопирован — вставьте ответ модели ниже.`, "ok");
+        setManualStem(stem);
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
-  const acceptManual = async () => {
-    const m = manualStem.match(/^(книга|акт|глава)_?(\d+)?$/);
-    if (!m) return notify("Выберите промпт (книга / акт_N / глава_NN).");
-    try {
-      await apiPost("/api/circles/manual", { scope: m[1], key: m[2] ? +m[2] : null, text: pasted });
-      notify("Круг принят.", "ok");
-      setPasted("");
-      load();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const acceptManual = () =>
+    run(async () => {
+      const m = manualStem.match(/^(книга|акт|глава)_?(\d+)?$/);
+      if (!m) return notify("Выберите промпт (книга / акт_N / глава_NN).");
+      try {
+        await apiPost("/api/circles/manual", { scope: m[1], key: m[2] ? +m[2] : null, text: pasted });
+        notify("Круг принят.", "ok");
+        setPasted("");
+        load();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
   const groups = ["книга", "акт", "глава"].map((s) => ({ scope: s, items: data.circles.filter((c) => c.scope === s) }));
 
@@ -93,7 +104,7 @@ export function Circles(props: {
         круги глав; каждый уровень строится внутри шага уровня выше. Черновики лежат в <code>круги_истории/</code>;
         после внесения в канон (документ 2.1) они попадают в окно Писателя («Драматургия главы») и в проверку Э2 (4.4).
         {" "}В каноне сейчас: <strong>{data.in_canon}</strong> круг(ов)
-        {pending > 0 && <>, не внесено или изменено: <strong>{pending}</strong></>}.
+        {pendingCanon > 0 && <>, не внесено или изменено: <strong>{pendingCanon}</strong></>}.
       </p>
       {nActs > 0 && (
         <table>
@@ -113,8 +124,8 @@ export function Circles(props: {
         <button disabled={busy} onClick={() => generate("акты")}>Акты</button>
         <button disabled={busy} onClick={() => generate("главы")}>Главы</button>
         <button disabled={busy} onClick={() => generate("всё", true)}>Пересчитать всё</button>
-        <button className={pending > 0 ? "primary" : ""} disabled={busy || data.circles.length === 0} onClick={toCanon}>
-          Внести в канон{pending > 0 ? ` (${pending})` : ""}
+        <button className={pendingCanon > 0 ? "primary" : ""} disabled={busy || data.circles.length === 0} onClick={toCanon}>
+          Внести в канон{pendingCanon > 0 ? ` (${pendingCanon})` : ""}
         </button>
       </div>
 
@@ -124,14 +135,16 @@ export function Circles(props: {
           <div className="actions">
             {data.prompts.map((p) => {
               const stem = p.replace(/\.md$/, "");
-              return <button key={p} onClick={() => copyPrompt(stem)}>{stem}</button>;
+              return <button key={p} disabled={pending} onClick={() => copyPrompt(stem)}>{stem}</button>;
             })}
           </div>
           {manualStem && (
             <>
               <p className="muted">Ответ модели для «{manualStem}»:</p>
-              <textarea value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="Вставьте JSON-ответ модели" />
-              <div className="actions"><button className="primary" disabled={!pasted.trim()} onClick={acceptManual}>Принять круг</button></div>
+              <textarea aria-label="Ответ модели" value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="Вставьте JSON-ответ модели" />
+              <div className="actions">
+                <button className="primary" disabled={busy || !pasted.trim()} onClick={acceptManual}>Принять круг</button>
+              </div>
             </>
           )}
         </details>
@@ -147,17 +160,29 @@ export function Circles(props: {
             const act = c.scope === "акт" ? data.acts.find((a) => a.act === c.key) : undefined;
             const actTitle = act ? ` · «${act.title}» (гл. ${act.from_chapter}–${act.to_chapter})` : "";
             const status = data.canon_status[stemOf(c)] ?? "не в каноне";
+            const isOpen = open === id;
             return (
               <div className="card" key={id}>
-                <div className="row" style={{ display: "flex", justifyContent: "space-between", cursor: "pointer" }}
-                  onClick={() => setOpen(open === id ? null : id)}>
+                <div
+                  className="row circle-head"
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={isOpen}
+                  onClick={() => setOpen(isOpen ? null : id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setOpen(isOpen ? null : id);
+                    }
+                  }}
+                >
                   <strong>
                     {c.title}{c.title.includes("«") ? "" : actTitle}{" "}
                     <span className={"badge" + (status === "в каноне" ? " b-зафиксировано" : "")}>{status}</span>
                   </strong>
                   <span className="muted">{c.summary}</span>
                 </div>
-                {open === id && (
+                {isOpen && (
                   <ol className="circle">
                     {c.steps.map((s) => (
                       <li key={s.n}>
@@ -167,7 +192,7 @@ export function Circles(props: {
                     ))}
                   </ol>
                 )}
-                {open === id && c.weak_spot && (
+                {isOpen && c.weak_spot && (
                   <div className="bad" style={{ marginTop: 6 }}><strong>Слабое место:</strong> {c.weak_spot}</div>
                 )}
               </div>

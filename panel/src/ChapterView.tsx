@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiGet, apiPost } from "./api";
-import type { Notify } from "./App";
+import type { Notify, RunCommand } from "./App";
+import type { Confirm } from "./Confirm";
+import { highlight, type Mark } from "./highlight";
+import { usePending } from "./hooks";
 import type { ChapterDetail, Flag, Job, Resolution } from "./types";
+
+const AUTHOR_FIX_CONFIRM =
+  "Считать расхождения текущего черновика с правками АВТОРСКОЙ правкой, а не самоволием Писателя? " +
+  "Самовольные изменения будут исключены из отчёта дифф-контроля (FR-E3), и глава сможет пройти приёмку. (Д-8)";
 
 // кнопки такта по состоянию FSM (сценарий А, §3.2)
 const ACTIONS: Record<string, { label: string; cmd: string; primary?: boolean; confirm?: string }[]> = {
@@ -14,8 +21,14 @@ const ACTIONS: Record<string, { label: string; cmd: string; primary?: boolean; c
   "верифицировано-1": [{ label: "Проверить Э2", cmd: "verify2", primary: true }],
   "верифицировано-2": [{ label: "Пакет приёмки", cmd: "review", primary: true }],
   "на-приёмке": [{ label: "Внести правки Писателем", cmd: "apply-edits", primary: true }],
-  "правки": [{ label: "Дифф-контроль", cmd: "diff-check", primary: true }],
-  "дифф-контроль": [{ label: "Повторить правки", cmd: "apply-edits" }],
+  "правки": [
+    { label: "Дифф-контроль", cmd: "diff-check", primary: true },
+    { label: "Дифф-контроль как авторская правка", cmd: "diff-check-author", confirm: AUTHOR_FIX_CONFIRM },
+  ],
+  "дифф-контроль": [
+    { label: "Повторить правки", cmd: "apply-edits" },
+    { label: "Дифф-контроль как авторская правка", cmd: "diff-check-author", confirm: AUTHOR_FIX_CONFIRM },
+  ],
   "принято": [
     { label: "Пакет в канон", cmd: "canonize", primary: true },
     {
@@ -36,12 +49,14 @@ export function ChapterView(props: {
   chapter: number;
   job: Job | null;
   refreshTick: number;
-  runCommand: (cmd: string, chapter?: number) => Promise<void>;
+  runCommand: RunCommand;
   notify: Notify;
+  confirm: Confirm;
 }) {
-  const { chapter, job, refreshTick, runCommand, notify } = props;
+  const { chapter, job, refreshTick, runCommand, notify, confirm } = props;
   const [d, setD] = useState<ChapterDetail | null>(null);
   const [tab, setTab] = useState<"чтение" | "правки" | "приёмка" | "ручной" | "история">("чтение");
+  const [pending, run] = usePending();
 
   const load = useCallback(() => {
     apiGet<ChapterDetail>(`/api/chapter/${chapter}`).then(setD).catch((e) => notify(String(e)));
@@ -51,35 +66,38 @@ export function ChapterView(props: {
 
   if (!d) return <p>Загрузка главы {chapter}…</p>;
 
-  const busy = job?.status === "выполняется";
+  const busy = job?.status === "выполняется" || pending;
   const actions = ACTIONS[d.state] ?? [];
   const diffClean = d.diff_report && d.diff_report.not_applied.length === 0 && d.diff_report.unauthorized.length === 0;
   const unresolved = d.resolutions.filter((r) => !r.decision).length;
 
-  const act = async (a: { cmd: string; confirm?: string }) => {
-    if (a.confirm && !window.confirm(a.confirm)) return;
-    await runCommand(a.cmd, chapter);
-  };
+  const act = (a: { cmd: string; confirm?: string }) =>
+    run(async () => {
+      if (a.confirm && !(await confirm(a.confirm))) return;
+      await runCommand(a.cmd, chapter);
+    });
 
-  const accept = async () => {
-    if (!window.confirm(`Принять главу ${chapter}? (FR-E4, явное подтверждение)`)) return;
-    try {
-      await apiPost(`/api/chapter/${chapter}/accept`);
-      load();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const accept = () =>
+    run(async () => {
+      if (!(await confirm(`Принять главу ${chapter}? (FR-E4, явное подтверждение)`))) return;
+      try {
+        await apiPost(`/api/chapter/${chapter}/accept`);
+        load();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
-  const rollback = async () => {
-    if (!window.confirm("Откатить главу на шаг назад?")) return;
-    try {
-      await apiPost(`/api/chapter/${chapter}/rollback`, {});
-      load();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const rollback = () =>
+    run(async () => {
+      if (!(await confirm(`Откатить главу ${chapter} на шаг назад?`))) return;
+      try {
+        await apiPost(`/api/chapter/${chapter}/rollback`, {});
+        load();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
   return (
     <>
@@ -98,7 +116,7 @@ export function ChapterView(props: {
 
       <div className="actions">
         {MACHINE_STATES.has(d.state) && (
-          <button className="primary" disabled={busy} onClick={() => runCommand("run", chapter)}
+          <button className="primary" disabled={busy} onClick={() => run(() => runCommand("run", chapter))}
             title="Выполнить машинные шаги такта до следующей паузы автора (FR-O1)">
             Продолжить такт ▶
           </button>
@@ -122,9 +140,9 @@ export function ChapterView(props: {
 
       {job && (job.chapter === chapter || job.chapter == null) && <JobBox job={job} />}
 
-      <div className="tabs">
+      <div className="tabs" role="tablist">
         {(["чтение", "правки", "приёмка", "ручной", "история"] as const).map((t) => (
-          <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
+          <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
             {t === "чтение" ? "Чтение с флагами" : t === "правки" ? "Правки" : t === "приёмка" ? "Приёмка"
               : t === "ручной" ? "Окно / ручной режим" : "История"}
           </button>
@@ -134,52 +152,64 @@ export function ChapterView(props: {
       {tab === "чтение" && <Reading d={d} reload={load} notify={notify} />}
       {tab === "правки" && <Edits d={d} reload={load} notify={notify} />}
       {tab === "приёмка" && <Acceptance d={d} reload={load} notify={notify} unresolved={unresolved} />}
-      {tab === "ручной" && <ManualTab d={d} reload={load} notify={notify} />}
+      {tab === "ручной" && <ManualTab d={d} reload={load} notify={notify} busy={busy} />}
       {tab === "история" && <History d={d} />}
     </>
   );
 }
 
+/** Задача такта: в /api/state приходит только хвост лога; полный — по /api/job,
+ *  и только пока вывод развёрнут (5.5). Перечитывается при росте лога. */
 function JobBox({ job }: { job: Job }) {
   const [open, setOpen] = useState(false);
+  const [full, setFull] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    apiGet<Job>("/api/job")
+      .then((j) => alive && setFull(j.output ?? ""))
+      .catch(() => alive && setFull(null));
+    return () => {
+      alive = false;
+    };
+  }, [open, job.output_len, job.status, job.started]);
+
   return (
     <div className="jobbox">
-      {job.status === "выполняется" ? <span className="spin" /> : null}
+      {job.status === "выполняется" ? <span className="spin" aria-hidden="true" /> : null}
       <strong>{job.name}</strong> <span className={`badge b-${job.status}`}>{job.status}</span>{" "}
-      {job.output && (
-        <button style={{ marginLeft: 8 }} onClick={() => setOpen(!open)}>
+      {job.output_len > 0 && (
+        <button style={{ marginLeft: 8 }} aria-expanded={open} onClick={() => setOpen(!open)}>
           {open ? "скрыть вывод" : "показать вывод"}
         </button>
       )}
-      {open && job.output && <pre>{job.output}</pre>}
+      {open && <pre>{full ?? job.output_tail}</pre>}
     </div>
   );
 }
 
 // ------------------------------------------------------------ Чтение с флагами
 
-function esc(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; notify: Notify }) {
   const html = useMemo(() => {
     if (!d.text) return null;
-    let h = esc(d.text);
-    const wrap = (quote: string, cls: string, id: string, title: string) => {
-      const q = esc(quote.trim());
-      if (q && h.includes(q) && !h.includes(`id="${id}"`)) {
-        const safeId = esc(id).replace(/"/g, "&quot;");
-        h = h.replace(q, () => `<mark id="${safeId}" class="m-${cls}" title="${esc(title).replace(/"/g, "&quot;")}">${q}</mark>`);
-      }
-    };
+    // один проход по позициям сырого текста, пересечения отбрасываются (5.3)
+    const marks: Mark[] = [];
     for (const c of d.verdict?.checks ?? []) {
       if (c.status === "PASS") continue;
-      c.quotes.slice(0, 3).forEach((q, j) => wrap(q, c.status, `a-${c.check_id}-${j}`, `${c.check_id}: порог ${c.threshold}, факт ${c.actual}`));
+      c.quotes.slice(0, 3).forEach((q, j) =>
+        marks.push({ quote: q, cls: c.status, id: `a-${c.check_id}-${j}`, title: `${c.check_id}: порог ${c.threshold}, факт ${c.actual}` }),
+      );
     }
-    for (const f of d.flags) wrap(f.quote, f.kind, `a-${f.flag_id}`, `${f.flag_id} · ${f.type}: ${f.rule}. ${f.recommendation}`);
-    return h;
+    for (const f of d.flags) {
+      marks.push({ quote: f.quote, cls: f.kind, id: `a-${f.flag_id}`, title: `${f.flag_id} · ${f.type}: ${f.rule}. ${f.recommendation}` });
+    }
+    return highlight(d.text, marks);
   }, [d]);
+
+  // решения возможны только когда есть resolutions.json — его создаёт «Пакет приёмки» (5.6)
+  const hasResolutions = d.resolutions.length > 0;
 
   return (
     <>
@@ -206,7 +236,8 @@ function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; 
       {d.flags.length === 0 && <p className="muted">Флагов нет{d.state === "сгенерировано" || d.state === "собрано" ? " (Э2 ещё не запускался)" : ""}.</p>}
       {d.flags.map((f) => (
         <FlagCard key={f.flag_id} f={f} chapter={d.chapter}
-          resolution={d.resolutions.find((r) => r.flag_id === f.flag_id)} reload={reload} notify={notify} />
+          resolution={d.resolutions.find((r) => r.flag_id === f.flag_id)}
+          canResolve={hasResolutions} reload={reload} notify={notify} />
       ))}
 
       {html ? (
@@ -221,19 +252,23 @@ function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; 
   );
 }
 
+const REGISTRIES = ["3.1", "3.2", "3.3", "1.2"];
+
 function FlagCard(props: {
-  f: Flag; chapter: number; resolution?: Resolution; reload: () => void; notify: Notify;
+  f: Flag; chapter: number; resolution?: Resolution; canResolve: boolean; reload: () => void; notify: Notify;
 }) {
-  const { f, chapter, resolution, reload, notify } = props;
-  const [registry, setRegistry] = useState("3.1");
-  const decide = async (decision: string) => {
-    try {
-      await apiPost(`/api/chapter/${chapter}/resolve`, { flag_id: f.flag_id, decision, registry });
-      reload();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const { f, chapter, resolution, canResolve, reload, notify } = props;
+  const [registry, setRegistry] = useState(REGISTRIES[0]);
+  const [pending, run] = usePending();
+  const decide = (decision: string) =>
+    run(async () => {
+      try {
+        await apiPost(`/api/chapter/${chapter}/resolve`, { flag_id: f.flag_id, decision, registry });
+        reload();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
   const badge = f.kind === "samovolka" ? "самоволка" : f.severity;
   const showType = f.type.trim().toLowerCase() !== badge.toLowerCase();
   return (
@@ -249,15 +284,17 @@ function FlagCard(props: {
             решение: {resolution.decision}
             {resolution.target_registry ? ` → ${resolution.target_registry}` : ""}
           </div>
-        ) : (
+        ) : canResolve && resolution ? (
           <div className="resolvebtns">
             <span className="unresolved">решение автора:</span>
-            <button onClick={() => decide("вычеркнуть")}>Вычеркнуть</button>
-            <button onClick={() => decide("канонизировать")}>Канонизировать →</button>
-            <select value={registry} onChange={(e) => setRegistry(e.target.value)}>
-              {["3.1", "3.2", "3.3", "1.2"].map((r) => <option key={r}>{r}</option>)}
+            <button disabled={pending} onClick={() => decide("вычеркнуть")}>Вычеркнуть</button>
+            <button disabled={pending} onClick={() => decide("канонизировать")}>Канонизировать →</button>
+            <select value={registry} aria-label="Реестр для канонизации" onChange={(e) => setRegistry(e.target.value)}>
+              {REGISTRIES.map((r) => <option key={r}>{r}</option>)}
             </select>
           </div>
+        ) : (
+          <div className="muted">решение автора — после «Пакета приёмки» (resolutions.json ещё нет)</div>
         )
       )}
     </div>
@@ -271,37 +308,40 @@ function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; no
   const [k1, setK1] = useState<number | null>(null);
   const [k2, setK2] = useState<number | null>(null);
   const [diff, setDiff] = useState<string[] | null>(null);
+  const [pending, run] = usePending();
 
   useEffect(() => setText(d.edits_md ?? "БЫЛО: \nСТАЛО: \n\nУКАЗАНИЕ: \n"), [d.edits_md]);
 
-  const save = async () => {
-    try {
-      const r = await apiPost<{ parsed: number }>(`/api/chapter/${d.chapter}/edits`, { text });
-      notify(`Сохранено: распознано правок — ${r.parsed}`, "ok");
-      reload();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const save = () =>
+    run(async () => {
+      try {
+        const r = await apiPost<{ parsed: number }>(`/api/chapter/${d.chapter}/edits`, { text });
+        notify(`Сохранено: распознано правок — ${r.parsed}`, "ok");
+        reload();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
-  const showDiff = async () => {
-    const a = k1 ?? d.drafts[d.drafts.length - 2];
-    const b = k2 ?? d.draft;
-    if (a == null || b == null) return;
-    try {
-      const r = await apiGet<{ lines: string[] }>(`/api/chapter/${d.chapter}/diff/${a}/${b}`);
-      setDiff(r.lines);
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const showDiff = () =>
+    run(async () => {
+      const a = k1 ?? d.drafts[d.drafts.length - 2];
+      const b = k2 ?? d.draft;
+      if (a == null || b == null) return;
+      try {
+        const r = await apiGet<{ lines: string[] }>(`/api/chapter/${d.chapter}/diff/${a}/${b}`);
+        setDiff(r.lines);
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
   return (
     <>
       <h2>edits.md — пары «БЫЛО/СТАЛО» и строки «УКАЗАНИЕ:»</h2>
-      <textarea value={text} onChange={(e) => setText(e.target.value)} />
+      <textarea aria-label="edits.md" value={text} onChange={(e) => setText(e.target.value)} />
       <div className="actions">
-        <button className="primary" onClick={save}>Сохранить правки</button>
+        <button className="primary" disabled={pending} onClick={save}>Сохранить правки</button>
       </div>
 
       {d.edits_parsed.length > 0 && (
@@ -324,14 +364,14 @@ function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; no
         <>
           <h2>Дифф черновиков</h2>
           <div className="actions">
-            <select value={k1 ?? d.drafts[d.drafts.length - 2]} onChange={(e) => setK1(+e.target.value)}>
+            <select aria-label="Старый черновик" value={k1 ?? d.drafts[d.drafts.length - 2]} onChange={(e) => setK1(+e.target.value)}>
               {d.drafts.map((k) => <option key={k} value={k}>draft_{k}</option>)}
             </select>
             →
-            <select value={k2 ?? d.draft} onChange={(e) => setK2(+e.target.value)}>
+            <select aria-label="Новый черновик" value={k2 ?? d.draft} onChange={(e) => setK2(+e.target.value)}>
               {d.drafts.map((k) => <option key={k} value={k}>draft_{k}</option>)}
             </select>
-            <button onClick={showDiff}>Показать дифф</button>
+            <button disabled={pending} onClick={showDiff}>Показать дифф</button>
           </div>
           {diff && (
             <div className="diff">
@@ -354,17 +394,19 @@ function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; no
 function Acceptance(props: { d: ChapterDetail; reload: () => void; notify: Notify; unresolved: number }) {
   const { d, reload, notify, unresolved } = props;
   const [batch, setBatch] = useState(d.canon_batch ?? "");
+  const [pending, run] = usePending();
   useEffect(() => setBatch(d.canon_batch ?? ""), [d.canon_batch]);
 
-  const saveBatch = async () => {
-    try {
-      await apiPost(`/api/chapter/${d.chapter}/canon-batch`, { text: batch });
-      notify("Пакет сохранён.", "ok");
-      reload();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const saveBatch = () =>
+    run(async () => {
+      try {
+        await apiPost(`/api/chapter/${d.chapter}/canon-batch`, { text: batch });
+        notify("Пакет сохранён.", "ok");
+        reload();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
   return (
     <>
@@ -386,6 +428,11 @@ function Acceptance(props: { d: ChapterDetail; reload: () => void; notify: Notif
         <p className="muted">Дифф-контроль ещё не выполнялся.</p>
       )}
       {d.diff_report?.unauthorized.map((u, i) => <div className="card" key={i}>{u}</div>)}
+      {d.diff_report && d.diff_report.unauthorized.length > 0 && (
+        <p className="muted">
+          Если текст правили вы сами — «Дифф-контроль как авторская правка» в кнопках такта (с подтверждением).
+        </p>
+      )}
 
       {unresolved > 0 && (
         <p className="unresolved">Самоволок без решения: {unresolved} — вкладка «Чтение с флагами».</p>
@@ -395,9 +442,9 @@ function Acceptance(props: { d: ChapterDetail; reload: () => void; notify: Notif
       {d.canon_batch != null ? (
         <>
           <p className="muted">Удалите строки, которые не принимаете, и сохраните — затем «Применить пакет + коммит».</p>
-          <textarea style={{ minHeight: 260 }} value={batch} onChange={(e) => setBatch(e.target.value)} />
+          <textarea aria-label="canon_batch.md" style={{ minHeight: 260 }} value={batch} onChange={(e) => setBatch(e.target.value)} />
           <div className="actions">
-            <button className="primary" onClick={saveBatch}>Сохранить пакет</button>
+            <button className="primary" disabled={pending} onClick={saveBatch}>Сохранить пакет</button>
           </div>
         </>
       ) : (
@@ -434,9 +481,11 @@ function History({ d }: { d: ChapterDetail }) {
 
 // -------------------------------------------------- Окно контекста и ручной режим
 
-function ManualTab({ d, reload, notify }: { d: ChapterDetail; reload: () => void; notify: Notify }) {
+function ManualTab({ d, reload, notify, busy }: { d: ChapterDetail; reload: () => void; notify: Notify; busy: boolean }) {
   const [win, setWin] = useState<{ text: string | null; size_flag: string | null } | null>(null);
   const [pasted, setPasted] = useState("");
+  const [pending, run] = usePending();
+  const locked = busy || pending;
 
   useEffect(() => {
     apiGet<{ text: string | null; size_flag: string | null }>(`/api/chapter/${d.chapter}/window`)
@@ -453,36 +502,40 @@ function ManualTab({ d, reload, notify }: { d: ChapterDetail; reload: () => void
     }
   };
 
-  const copyPrompt = async (kind: "verify2" | "edits", what: string) => {
-    try {
-      const r = await apiGet<{ text: string }>(`/api/chapter/${d.chapter}/prompt/${kind}`);
-      await copy(r.text, what);
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  // POST: промпт строится и СОХРАНЯЕТСЯ в папку главы (GET ничего не пишет — аудит 4.3)
+  const copyPrompt = (kind: "verify2" | "edits", what: string) =>
+    run(async () => {
+      try {
+        const r = await apiPost<{ text: string }>(`/api/chapter/${d.chapter}/prompt/${kind}`);
+        await copy(r.text, what);
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
-  const sendDraft = async () => {
-    try {
-      const r = await apiPost<{ draft: number }>(`/api/chapter/${d.chapter}/manual-draft`, { text: pasted });
-      notify(`Черновик принят как draft_${r.draft}.`, "ok");
-      setPasted("");
-      reload();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const sendDraft = () =>
+    run(async () => {
+      try {
+        const r = await apiPost<{ draft: number }>(`/api/chapter/${d.chapter}/manual-draft`, { text: pasted });
+        notify(`Черновик принят как draft_${r.draft}.`, "ok");
+        setPasted("");
+        reload();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
-  const sendFlags = async () => {
-    try {
-      const r = await apiPost<{ flags: number }>(`/api/chapter/${d.chapter}/manual-flags`, { text: pasted });
-      notify(`Принято флагов Э2: ${r.flags}.`, "ok");
-      setPasted("");
-      reload();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const sendFlags = () =>
+    run(async () => {
+      try {
+        const r = await apiPost<{ flags: number }>(`/api/chapter/${d.chapter}/manual-flags`, { text: pasted });
+        notify(`Принято флагов Э2: ${r.flags}.`, "ok");
+        setPasted("");
+        reload();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
 
   const needDraft = ["собрано", "сгенерировано", "на-приёмке", "дифф-контроль"].includes(d.state);
   const needFlags = d.state === "верифицировано-1";
@@ -502,14 +555,14 @@ function ManualTab({ d, reload, notify }: { d: ChapterDetail; reload: () => void
               <button onClick={() => copy(win.text!, "Окно контекста")}>Скопировать окно контекста</button>
             )}
             {(d.state === "на-приёмке" || d.state === "дифф-контроль") && (
-              <button onClick={() => copyPrompt("edits", "Промпт правок")}>Скопировать промпт правок</button>
+              <button disabled={locked} onClick={() => copyPrompt("edits", "Промпт правок")}>Скопировать промпт правок</button>
             )}
           </div>
-          <textarea placeholder={`Вставьте текст главы — будет сохранён как draft_${d.draft + 1}.md`}
+          <textarea aria-label="Текст черновика" placeholder={`Вставьте текст главы — будет сохранён как draft_${d.draft + 1}.md`}
             value={pasted} onChange={(e) => setPasted(e.target.value)} />
           <div className="actions">
-            <button className="primary" disabled={!pasted.trim()} onClick={sendDraft}>
-              Принять как draft_{d.draft + 1}
+            <button className="primary" disabled={locked || !pasted.trim()} onClick={sendDraft}>
+              {pending ? "Регистрируется…" : `Принять как draft_${d.draft + 1}`}
             </button>
           </div>
         </>
@@ -519,14 +572,14 @@ function ManualTab({ d, reload, notify }: { d: ChapterDetail; reload: () => void
         <>
           <h2>Проверка Э2 вручную</h2>
           <div className="actions">
-            <button onClick={() => copyPrompt("verify2", "Промпт Верификатора-2")}>
+            <button disabled={locked} onClick={() => copyPrompt("verify2", "Промпт Верификатора-2")}>
               Сформировать и скопировать промпт Э2
             </button>
           </div>
-          <textarea placeholder="Вставьте JSON-ответ модели (можно вместе с пояснениями — массив будет найден)"
+          <textarea aria-label="Ответ Верификатора-2" placeholder="Вставьте JSON-ответ модели (можно вместе с пояснениями — массив будет найден)"
             value={pasted} onChange={(e) => setPasted(e.target.value)} />
           <div className="actions">
-            <button className="primary" disabled={!pasted.trim()} onClick={sendFlags}>Принять флаги Э2</button>
+            <button className="primary" disabled={locked || !pasted.trim()} onClick={sendFlags}>Принять флаги Э2</button>
           </div>
         </>
       )}

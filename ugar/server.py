@@ -2,9 +2,15 @@
 
 Контур остаётся локальным (§1.3): сервер слушает ТОЛЬКО 127.0.0.1, наружу
 ничего не ходит, все операции — те же функции, что у CLI (FSM, guard и
-подтверждения сохраняются). Изменяющие запросы требуют заголовка
-`X-Ugar-Panel: 1` — браузерный cross-origin не может его послать без
-CORS-преflight, который мы не разрешаем.
+подтверждения сохраняются). Защита от чужих сайтов (аудит 4.2/4.3):
+
+* каждый запрос обязан нести `Host: 127.0.0.1:<порт>` или `localhost:<порт>`
+  — DNS-rebinding приходит с чужим Host и получает 403;
+* изменяющие запросы требуют заголовка `X-Ugar-Panel: 1` (браузерный
+  cross-origin не может его послать без CORS-preflight, который мы не
+  разрешаем) и, если браузер прислал `Origin`, — локального Origin;
+* GET ничего не пишет на диск: промпты и дашборд строятся в памяти,
+  запись файла промпта — отдельный POST.
 """
 
 from __future__ import annotations
@@ -14,7 +20,6 @@ import io
 import json
 import re
 import threading
-import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -26,14 +31,22 @@ from . import exporter, review, timing, verifier2
 from .config import Config
 from .fsm import ChapterState, all_states
 from .paths import Workspace
-from .schemas import Resolution
 
 # команды такта, доступные из панели (белый список)
 COMMANDS = {
     "run", "export", "compile", "write", "verify1", "verify2", "review",
-    "apply-edits", "diff-check", "regress", "canonize", "canonize-apply", "story-circles",
-    "circles-canon",
+    "apply-edits", "diff-check", "diff-check-author", "regress", "canonize", "canonize-apply",
+    "story-circles", "circles-canon",
 }
+
+# допустимые уровни кругов истории (Р-020) и виды промптов ручного режима
+CIRCLE_SCOPES = ("книга", "акт", "глава")
+PROMPT_KINDS = ("verify2", "edits")
+
+# лимит тела POST: рукопись главы — десятки КБ, 50 МБ — заведомо чужой запрос
+MAX_BODY = 50 * 1024 * 1024
+# хвост лога задачи, который уезжает в /api/state при каждом опросе (5.5)
+OUTPUT_TAIL = 2048
 
 
 class _LiveBuffer(io.TextIOBase):
@@ -50,36 +63,64 @@ class _LiveBuffer(io.TextIOBase):
 
 
 class JobRunner:
-    """Одна задача за раз (Д-5: однопользовательский режим, без гонок FSM).
+    """Одна операция за раз (Д-5: однопользовательский режим, без гонок FSM).
 
-    redirect_stdout глобален для процесса, поэтому пока задача идёт,
-    другие захватывающие вывод операции (accept/rollback/ручной режим)
-    отклоняются через ensure_idle().
+    redirect_stdout глобален для процесса, поэтому ЛЮБАЯ операция,
+    захватывающая вывод (фоновая задача, accept/rollback/ручной режим),
+    идёт под одной блокировкой `exclusive()`: вторая одновременная
+    операция не ждёт, а сразу отклоняется («дождитесь завершения»).
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()      # защита job['output']
+        self._gate = threading.Lock()      # одна операция с захватом вывода
         self.job: dict | None = None
 
     @property
     def busy(self) -> bool:
         return bool(self.job and self.job["status"] == "выполняется")
 
+    def _busy_message(self) -> str:
+        if self.busy:
+            return f"дождитесь завершения задачи «{self.job['name']}»"  # type: ignore[index]
+        return "дождитесь завершения текущей операции"
+
+    def _acquire(self) -> None:
+        """Неблокирующий захват: занято → RuntimeError, а не ожидание."""
+        if not self._gate.acquire(blocking=False):
+            raise RuntimeError(self._busy_message())
+        if self.busy:  # страховка: задача идёт, а замок по какой-то причине свободен
+            self._gate.release()
+            raise RuntimeError(self._busy_message())
+
     def ensure_idle(self) -> None:
         if self.busy:
-            raise RuntimeError(f"дождитесь завершения задачи «{self.job['name']}»")  # type: ignore[index]
+            raise RuntimeError(self._busy_message())
+
+    @contextlib.contextmanager
+    def exclusive(self):
+        """Контекст для синхронных операций (accept, rollback, ручной режим…)."""
+        self._acquire()
+        try:
+            yield
+        finally:
+            self._gate.release()
 
     def start(self, name: str, chapter: int | None, fn) -> dict:
-        with self._lock:
-            self.ensure_idle()
-            self.job = {
-                "name": name,
-                "chapter": chapter,
-                "status": "выполняется",
-                "output": "",
-                "started": datetime.now(timezone.utc).isoformat(),
-            }
-        threading.Thread(target=self._run, args=(fn,), daemon=True).start()
+        self._acquire()  # замок держится всё время задачи, отпускает _run
+        try:
+            with self._lock:
+                self.job = {
+                    "name": name,
+                    "chapter": chapter,
+                    "status": "выполняется",
+                    "output": "",
+                    "started": datetime.now(timezone.utc).isoformat(),
+                }
+            threading.Thread(target=self._run, args=(fn,), daemon=True).start()
+        except BaseException:
+            self._gate.release()
+            raise
         return self.job
 
     def _run(self, fn) -> None:
@@ -97,8 +138,27 @@ class JobRunner:
         except Exception as e:  # показываем автору, не роняем сервер
             buf.write(f"\nОШИБКА: {e}")
             status = "ошибка"
-        self.job["status"] = status
-        self.job["finished"] = datetime.now(timezone.utc).isoformat()
+        finally:
+            with self._lock:
+                self.job["status"] = status
+                self.job["finished"] = datetime.now(timezone.utc).isoformat()
+            self._gate.release()
+
+    def summary(self) -> dict | None:
+        """Задача для /api/state: без полного лога — хвост и длина (5.5)."""
+        with self._lock:
+            job = self.job
+            if job is None:
+                return None
+            out = job["output"]
+            summary = {k: v for k, v in job.items() if k != "output"}
+        summary["output_tail"] = out[-OUTPUT_TAIL:]
+        summary["output_len"] = len(out)
+        return summary
+
+    def full(self) -> dict:
+        with self._lock:
+            return dict(self.job) if self.job else {}
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -106,6 +166,18 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
+
+
+def _captured(fn, refusal: str) -> str:
+    """Выполняет функцию CLI с захватом вывода; typer.Exit ≠ 0 → RuntimeError с текстом."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            fn()
+    except typer.Exit as e:
+        if getattr(e, "exit_code", 1):
+            raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or refusal)
+    return _strip_ansi(buf.getvalue())
 
 
 class PanelAPI:
@@ -152,7 +224,7 @@ class PanelAPI:
             "briefs": briefs,
             "regression_green": regression.is_green(self.ws),
             "models": {"writer": self.cfg.writer.model, "verifier2": self.cfg.verifier2.model},
-            "job": self.jobs.job,
+            "job": self.jobs.summary(),
         }
 
     def chapter(self, n: int) -> dict:
@@ -224,14 +296,15 @@ class PanelAPI:
         }
 
     def prompt(self, n: int, kind: str) -> dict:
-        """Промпт для ручного прогона (NFR-3): verify2 строится по требованию."""
-        if kind == "verify2":
-            from . import guard
+        """Промпт для ручного прогона (NFR-3): строится в памяти, НИЧЕГО не пишет (4.3).
 
+        Возвращает текст, имя файла ответа и имя файла промпта — записать его
+        на диск можно отдельным POST (`save_prompt`).
+        """
+        if kind == "verify2":
             system, user = verifier2.build_prompt(self.ws, n, ChapterState(self.ws, n).draft)
             text = f"<!-- system -->\n{system}\n\n<!-- user -->\n{user}\n"
-            guard.write_text(self.ws.chapter_dir(n) / "verify2_prompt.md", text)
-            return {"text": text, "target": "flags.json"}
+            return {"text": text, "target": "flags.json", "file": "verify2_prompt.md"}
         if kind == "edits":
             p = self.ws.chapter_dir(n) / "apply_edits_prompt.md"
             if not p.exists():
@@ -242,8 +315,8 @@ class PanelAPI:
                 text = writer.edit_prompt(self.ws, n, ChapterState(self.ws, n).draft, edits)
             else:
                 text = p.read_text(encoding="utf-8")
-            return {"text": text, "target": f"draft_{ChapterState(self.ws, n).draft + 1}.md"}
-        raise ValueError(f"неизвестный промпт: {kind}")
+            return {"text": text, "target": f"draft_{ChapterState(self.ws, n).draft + 1}.md", "file": p.name}
+        raise ValueError(f"неизвестный промпт: {kind} (допустимо: {', '.join(PROMPT_KINDS)})")
 
     def find(self, query: str) -> dict:
         from . import search
@@ -253,102 +326,101 @@ class PanelAPI:
 
     # ---------------------------------------------------------- изменения
 
+    def save_prompt(self, n: int, kind: str) -> dict:
+        """POST: тот же промпт, но с записью в папку главы (для ручного прогона из файла)."""
+        from . import guard
+
+        with self.jobs.exclusive():
+            data = self.prompt(n, kind)
+            path = self.ws.chapter_dir(n) / data["file"]
+            guard.write_text(path, data["text"])
+        return {**data, "saved": str(path)}
+
     def save_edits(self, n: int, text: str) -> dict:
         from . import guard
 
-        guard.write_text(self.ws.chapter_dir(n) / "edits.md", text)
-        edits = review.parse_edits_md(self.ws, n)
+        with self.jobs.exclusive():
+            guard.write_text(self.ws.chapter_dir(n) / "edits.md", text)
+            edits = review.parse_edits_md(self.ws, n)
         return {"parsed": len(edits)}
 
     def resolve(self, n: int, flag_id: str, decision: str, registry: str | None) -> dict:
+        from .canonist import REGISTRY_GLOBS
+
         if decision not in ("вычеркнуть", "канонизировать"):
             raise ValueError("решение: «вычеркнуть» или «канонизировать»")
-        resolutions = review.load_resolutions(self.ws, n)
-        for r in resolutions:
-            if r.flag_id == flag_id:
-                r.decision = decision  # type: ignore[assignment]
-                r.target_registry = registry if decision == "канонизировать" else None
-                review.save_resolutions(self.ws, n, resolutions)
-                return {"ok": True}
+        if decision == "канонизировать" and registry not in REGISTRY_GLOBS:
+            raise ValueError(f"реестр: один из {', '.join(REGISTRY_GLOBS)}")
+        with self.jobs.exclusive():
+            resolutions = review.load_resolutions(self.ws, n)
+            for r in resolutions:
+                if r.flag_id == flag_id:
+                    r.decision = decision  # type: ignore[assignment]
+                    r.target_registry = registry if decision == "канонизировать" else None
+                    review.save_resolutions(self.ws, n, resolutions)
+                    return {"ok": True}
         raise ValueError(f"самоволка {flag_id} не найдена")
 
     def save_canon_batch(self, n: int, text: str) -> dict:
         from . import guard
 
-        guard.write_text(self.ws.chapter_dir(n) / "canon_batch.md", text)
+        with self.jobs.exclusive():
+            guard.write_text(self.ws.chapter_dir(n) / "canon_batch.md", text)
         return {"ok": True}
 
     def manual_draft(self, n: int, text: str) -> dict:
         """Ручной режим (NFR-3): вставленный ответ Писателя → следующий черновик.
 
         По состоянию FSM выбирается регистрация: генерация (write --manual)
-        или внесение правок (apply-edits --manual).
+        или внесение правок (apply-edits --manual). Состояние проверяется
+        ДО записи файла; вторая одновременная отправка (двойной клик)
+        отклоняется замком `exclusive()` — дубликата draft_k+1 не будет.
         """
-        self.jobs.ensure_idle()
         if not text.strip():
             raise ValueError("пустой текст черновика")
         from . import guard
         from .cli import cmd_apply_edits, cmd_write
 
-        st = ChapterState(self.ws, n)
-        k = st.draft + 1
-        guard.write_text(self.ws.draft_path(n, k), text)
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                if st.state in ("собрано", "сгенерировано"):
-                    cmd_write(n, manual=True)
-                elif st.state in ("на-приёмке", "дифф-контроль"):
-                    cmd_apply_edits(n, manual=True)
-                else:
-                    raise ValueError(f"из состояния «{st.state}» черновик руками не принимается")
-        except typer.Exit as e:
-            if getattr(e, "exit_code", 1):
-                raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or "черновик не принят")
-        return {"ok": True, "draft": k, "output": _strip_ansi(buf.getvalue())}
+        with self.jobs.exclusive():
+            st = ChapterState(self.ws, n)
+            if st.state in ("собрано", "сгенерировано"):
+                register = lambda: cmd_write(n, manual=True)  # noqa: E731
+            elif st.state in ("на-приёмке", "дифф-контроль"):
+                register = lambda: cmd_apply_edits(n, manual=True)  # noqa: E731
+            else:
+                raise ValueError(f"из состояния «{st.state}» черновик руками не принимается")
+            k = st.draft + 1
+            guard.write_text(self.ws.draft_path(n, k), text)
+            output = _captured(register, "черновик не принят")
+        return {"ok": True, "draft": k, "output": output}
 
     def manual_flags(self, n: int, text: str) -> dict:
         """Ручной режим Э2: вставленный ответ Верификатора-2 → flags.json + verify2 --manual."""
-        self.jobs.ensure_idle()
         from .cli import cmd_verify2
 
         flags = verifier2.parse_flags(text)  # понимает JSON в прозе/```-блоке
-        verifier2.save_flags(self.ws, n, flags)
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                cmd_verify2(n, manual=True)
-        except typer.Exit as e:
-            if getattr(e, "exit_code", 1):
-                raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or "флаги не приняты")
+        with self.jobs.exclusive():
+            st = ChapterState(self.ws, n)
+            if st.state != "верифицировано-1":  # проверка ДО перезаписи flags.json (4.6)
+                raise ValueError(f"из состояния «{st.state}» флаги Э2 руками не принимаются")
+            verifier2.save_flags(self.ws, n, flags)
+            _captured(lambda: cmd_verify2(n, manual=True), "флаги не приняты")
         return {"ok": True, "flags": len(flags)}
 
     def accept(self, n: int) -> dict:
         """Приёмка: подтверждение автор дал кнопкой + диалогом в панели (Д-8)."""
-        self.jobs.ensure_idle()
         from .cli import cmd_accept
 
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                cmd_accept(n, yes=True)
-        except typer.Exit as e:
-            if getattr(e, "exit_code", 1):
-                raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or "приёмка отклонена")
-        return {"ok": True, "output": _strip_ansi(buf.getvalue())}
+        with self.jobs.exclusive():
+            output = _captured(lambda: cmd_accept(n, yes=True), "приёмка отклонена")
+        return {"ok": True, "output": output}
 
     def rollback(self, n: int, to: str | None) -> dict:
-        self.jobs.ensure_idle()
         from .cli import cmd_rollback
 
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                cmd_rollback(n, to=to, yes=True)
-        except typer.Exit as e:
-            if getattr(e, "exit_code", 1):
-                raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or "откат отклонён")
-        return {"ok": True, "output": _strip_ansi(buf.getvalue())}
+        with self.jobs.exclusive():
+            output = _captured(lambda: cmd_rollback(n, to=to, yes=True), "откат отклонён")
+        return {"ok": True, "output": output}
 
     def circles(self) -> dict:
         from . import circles as circles_mod
@@ -371,19 +443,32 @@ class PanelAPI:
         path = self.ws.root / "круги_истории" / "промпты" / f"{stem}.md"
         return {"text": path.read_text(encoding="utf-8")}
 
-    def manual_circle(self, scope: str, key: int | None, text: str) -> dict:
+    def manual_circle(self, scope: str, key, text: str) -> dict:
         from . import circles as circles_mod
 
-        path = circles_mod.accept_manual(self.ws, scope, key, text)
+        if scope not in CIRCLE_SCOPES:
+            raise ValueError(f"уровень круга: один из {', '.join(CIRCLE_SCOPES)}")
+        if key is not None and (isinstance(key, bool) or not isinstance(key, int)):
+            raise ValueError("ключ круга: целое число (номер акта/главы) или null")
+        if scope == "книга" and key is not None:
+            raise ValueError("у круга книги нет ключа")
+        if scope != "книга" and key is None:
+            raise ValueError(f"для уровня «{scope}» нужен номер")
+        if not text.strip():
+            raise ValueError("пустой ответ модели")
+        with self.jobs.exclusive():
+            path = circles_mod.accept_manual(self.ws, scope, key, text)
         return {"ok": True, "path": str(path)}
 
     def run_command(self, cmd: str, chapter: int | None, params: dict | None = None) -> dict:
         """Долгие шаги такта — фоновой задачей с захватом вывода."""
         if cmd not in COMMANDS:
             raise ValueError(f"неизвестная команда: {cmd}")
+        if chapter is not None and (isinstance(chapter, bool) or not isinstance(chapter, int)):
+            raise ValueError("номер главы: целое число")
         from . import cli
 
-        params = params or {}
+        params = params if isinstance(params, dict) else {}
         fns = {
             "story-circles": lambda: cli.cmd_circles(
                 params.get("scope", "всё"), chapter=params.get("chapter"), redo=bool(params.get("redo")),
@@ -400,20 +485,32 @@ class PanelAPI:
             "review": lambda: cli.cmd_review(chapter),
             "apply-edits": lambda: cli.cmd_apply_edits(chapter, manual=False),
             "diff-check": lambda: cli.cmd_diff_check(chapter, author_fix=False),
+            # автор правил текст сам — расхождения не самоволия (подтверждено диалогом в панели)
+            "diff-check-author": lambda: cli.cmd_diff_check(chapter, author_fix=True),
             "regress": lambda: cli.cmd_regress(llm=False),
             "canonize": lambda: cli.cmd_canonize(chapter, apply=False, yes=True),
             # подтверждение автор дал кнопкой + диалогом в панели (Д-8)
             "canonize-apply": lambda: cli.cmd_canonize(chapter, apply=True, yes=True),
         }
-        return self.jobs.start(cmd, chapter, fns[cmd])
+        self.jobs.start(cmd, chapter, fns[cmd])
+        return self.jobs.summary()  # type: ignore[return-value]
 
 
 def _static_root() -> Path:
-    return Path(str(resources.files("ugar").joinpath("data/панель")))
+    # resolve(): статика может лежать за симлинком (pip -e, venv) — иначе 403 на всё
+    return Path(str(resources.files("ugar").joinpath("data/панель"))).resolve()
 
 
 MIME = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml",
         ".png": "image/png", ".ico": "image/x-icon", ".map": "application/json"}
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+def _local_hosts(port: int) -> set[str]:
+    return {f"127.0.0.1:{port}", f"localhost:{port}"}
 
 
 def make_handler(api: PanelAPI):
@@ -437,14 +534,39 @@ def make_handler(api: PanelAPI):
         def _error(self, message: str, code: int = 400) -> None:
             self._json({"error": message}, code)
 
+        def _port(self) -> int:
+            return int(self.server.server_address[1])
+
+        def _host_ok(self) -> bool:
+            """Host обязан быть локальным: DNS-rebinding приходит с чужим именем (4.2)."""
+            host = (self.headers.get("Host") or "").strip().lower()
+            return host in _local_hosts(self._port())
+
+        def _origin_ok(self) -> bool:
+            origin = self.headers.get("Origin")
+            if origin is None:
+                return True
+            allowed = {f"http://{h}" for h in _local_hosts(self._port())}
+            return origin.strip().lower() in allowed
+
         def _body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise ValueError("некорректный Content-Length") from None
+            if length > MAX_BODY:
+                raise _BodyTooLarge()
             raw = self.rfile.read(length) if length else b"{}"
-            return json.loads(raw.decode("utf-8") or "{}")
+            data = json.loads(raw.decode("utf-8") or "{}")
+            if not isinstance(data, dict):
+                raise ValueError("тело запроса должно быть JSON-объектом")
+            return data
 
         # --------------------------------------------------------- GET
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._host_ok():
+                return self._error("запрос не с локального адреса панели (Host)", 403)
             try:
                 path = self.path.split("?")[0]
                 if path == "/api/state":
@@ -477,15 +599,17 @@ def make_handler(api: PanelAPI):
                 if path == "/api/log":
                     return self._json(api.api_log())
                 if path == "/api/job":
-                    return self._json(api.jobs.job or {})
+                    return self._json(api.jobs.full())
                 if path == "/dashboard":
                     from . import dashboard
 
-                    out = dashboard.build_dashboard(api.ws)
-                    return self._send(200, out.read_bytes(), "text/html")
+                    # в памяти: GET не пишет dashboard.html (4.3); файл пишет `ugar dashboard`
+                    return self._send(200, dashboard.render_dashboard(api.ws).encode("utf-8"), "text/html")
                 return self._static(path)
             except FileNotFoundError as e:
                 self._error(str(e), 404)
+            except ValueError as e:
+                self._error(str(e), 400)
             except Exception as e:
                 self._error(str(e), 500)
 
@@ -504,8 +628,12 @@ def make_handler(api: PanelAPI):
         # --------------------------------------------------------- POST
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._host_ok():
+                return self._error("запрос не с локального адреса панели (Host)", 403)
             if self.headers.get("X-Ugar-Panel") != "1":
                 return self._error("нет заголовка X-Ugar-Panel (защита от cross-origin)", 403)
+            if not self._origin_ok():
+                return self._error("чужой Origin (защита от cross-origin)", 403)
             try:
                 body = self._body()
                 path = self.path.split("?")[0]
@@ -514,7 +642,7 @@ def make_handler(api: PanelAPI):
                     return self._json({"job": job})
                 m = re.fullmatch(r"/api/chapter/(\d+)/edits", path)
                 if m:
-                    return self._json(api.save_edits(int(m.group(1)), body.get("text", "")))
+                    return self._json(api.save_edits(int(m.group(1)), str(body.get("text", ""))))
                 m = re.fullmatch(r"/api/chapter/(\d+)/resolve", path)
                 if m:
                     return self._json(
@@ -522,15 +650,18 @@ def make_handler(api: PanelAPI):
                     )
                 m = re.fullmatch(r"/api/chapter/(\d+)/canon-batch", path)
                 if m:
-                    return self._json(api.save_canon_batch(int(m.group(1)), body.get("text", "")))
+                    return self._json(api.save_canon_batch(int(m.group(1)), str(body.get("text", ""))))
+                m = re.fullmatch(r"/api/chapter/(\d+)/prompt/(\w+)", path)
+                if m:
+                    return self._json(api.save_prompt(int(m.group(1)), m.group(2)))
                 if path == "/api/circles/manual":
-                    return self._json(api.manual_circle(body.get("scope", ""), body.get("key"), body.get("text", "")))
+                    return self._json(api.manual_circle(body.get("scope", ""), body.get("key"), str(body.get("text", ""))))
                 m = re.fullmatch(r"/api/chapter/(\d+)/manual-draft", path)
                 if m:
-                    return self._json(api.manual_draft(int(m.group(1)), body.get("text", "")))
+                    return self._json(api.manual_draft(int(m.group(1)), str(body.get("text", ""))))
                 m = re.fullmatch(r"/api/chapter/(\d+)/manual-flags", path)
                 if m:
-                    return self._json(api.manual_flags(int(m.group(1)), body.get("text", "")))
+                    return self._json(api.manual_flags(int(m.group(1)), str(body.get("text", ""))))
                 m = re.fullmatch(r"/api/chapter/(\d+)/accept", path)
                 if m:
                     return self._json(api.accept(int(m.group(1))))
@@ -538,6 +669,9 @@ def make_handler(api: PanelAPI):
                 if m:
                     return self._json(api.rollback(int(m.group(1)), body.get("to")))
                 return self._error("неизвестный путь", 404)
+            except _BodyTooLarge:
+                self.close_connection = True
+                self._error(f"тело запроса больше {MAX_BODY // (1024 * 1024)} МБ", 413)
             except (ValueError, RuntimeError) as e:
                 self._error(str(e), 400)
             except Exception as e:

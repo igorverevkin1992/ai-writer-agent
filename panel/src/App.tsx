@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { apiGet, apiPost } from "./api";
 import { ChapterView } from "./ChapterView";
 import { Circles } from "./Circles";
+import { useConfirm } from "./Confirm";
+import { usePending } from "./hooks";
 import type { ApiLogRow, AppState, Job } from "./types";
 
 type View =
@@ -12,39 +14,57 @@ type View =
   | { kind: "поиск"; q: string };
 
 export type Notify = (text: string, kind?: "ok" | "err") => void;
+export type RunCommand = (cmd: string, chapter?: number, params?: Record<string, unknown>) => Promise<void>;
+
+// опрос /api/state: раз в секунду пока идёт задача, иначе — раз в 2,5 с
+const POLL_RUNNING_MS = 1000;
+const POLL_IDLE_MS = 2500;
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [view, setView] = useState<View | null>(null);
   const [toast, setToast] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
-  const [prevJob, setPrevJob] = useState<Job | null>(null);
   const [query, setQuery] = useState("");
+  // 5.1: предыдущая задача — в ref, а не в state: иначе refresh пересоздавался бы
+  // на каждый ответ, а useEffect с интервалом перезапускался бы без задержки
+  const prevJob = useRef<Job | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
+  const [confirm, confirmDialog] = useConfirm();
+  const [pending, run] = usePending();
 
   const notify: Notify = useCallback((text, kind = "err") => {
+    window.clearTimeout(toastTimer.current);
     setToast({ text: text.replace(/^Error:\s*/, ""), kind });
-    if (kind === "ok") setTimeout(() => setToast(null), 3500);
+    if (kind === "ok") toastTimer.current = window.setTimeout(() => setToast(null), 3500);
   }, []);
+  useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
   const refresh = useCallback(async () => {
     try {
       const s = await apiGet<AppState>("/api/state");
       setState(s);
-      // задача завершилась → перечитать карточку главы
-      if (prevJob?.status === "выполняется" && s.job && s.job.status !== "выполняется") {
+      // 5.2: задача завершилась — сменился started (новая задача уже закончилась,
+      // например быстрый compile) или статус ушёл из «выполняется» → перечитать карточку
+      const was = prevJob.current;
+      const now = s.job;
+      if (now && now.status !== "выполняется" && (!was || was.started !== now.started || was.status === "выполняется")) {
         setRefreshTick((t) => t + 1);
       }
-      setPrevJob(s.job);
+      prevJob.current = now;
     } catch (e) {
       notify(String(e));
     }
-  }, [prevJob, notify]);
+  }, [notify]);
 
+  const running = state?.job?.status === "выполняется";
   useEffect(() => {
+    // зависимости — стабильный колбэк и булево: эффект перезапускается только
+    // при смене «идёт/не идёт», а не на каждый ответ сервера
     refresh();
-    const id = setInterval(refresh, state?.job?.status === "выполняется" ? 1000 : 2500);
-    return () => clearInterval(id);
-  }, [refresh, state?.job?.status]);
+    const id = window.setInterval(refresh, running ? POLL_RUNNING_MS : POLL_IDLE_MS);
+    return () => window.clearInterval(id);
+  }, [refresh, running]);
 
   useEffect(() => {
     if (!view && state) {
@@ -53,20 +73,25 @@ export default function App() {
     }
   }, [state, view]);
 
-  const runCommand = async (cmd: string, chapter?: number, params?: Record<string, unknown>) => {
-    try {
-      await apiPost("/api/command", { cmd, chapter, params });
-      refresh();
-    } catch (e) {
-      notify(String(e));
-    }
-  };
+  const runCommand: RunCommand = useCallback(
+    async (cmd, chapter, params) => {
+      try {
+        const r = await apiPost<{ job: Job }>("/api/command", { cmd, chapter, params });
+        // ответ POST уже несёт задачу — кнопки блокируются сразу, не дожидаясь опроса
+        setState((s) => (s ? { ...s, job: r.job } : s));
+      } catch (e) {
+        notify(String(e));
+      }
+    },
+    [notify],
+  );
 
   if (!state) return <div style={{ padding: 30 }}>Подключение к конвейеру…</div>;
 
   const known = new Set(state.chapters.map((c) => c.chapter));
   const notStarted = state.briefs.filter((b) => !known.has(b.chapter));
-  const busy = state.job?.status === "выполняется";
+  const busy = running || pending;
+  const isActive = (n: number) => view?.kind === "глава" && view.n === n;
 
   return (
     <div className="layout">
@@ -79,8 +104,8 @@ export default function App() {
           {state.regression_green === null ? "не запускалась" : state.regression_green ? "зелёная ✓" : "КРАСНАЯ ✗"}
         </div>
         <div className="sidebtns">
-          <button disabled={busy} onClick={() => runCommand("export")}>Экспорт канона</button>
-          <button disabled={busy} onClick={() => runCommand("regress")}>Регрессия</button>
+          <button disabled={busy} onClick={() => run(() => runCommand("export"))}>Экспорт канона</button>
+          <button disabled={busy} onClick={() => run(() => runCommand("regress"))}>Регрессия</button>
           <button className={view?.kind === "дашборд" ? "primary" : ""} onClick={() => setView({ kind: "дашборд" })}>
             Дашборд
           </button>
@@ -102,41 +127,36 @@ export default function App() {
           <input
             className="search"
             placeholder="Поиск по канону…"
+            aria-label="Поиск по канону"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
         </form>
 
-        <div className="muted" style={{ margin: "6px 0" }}>Очередь глав</div>
-        {state.chapters.map((c) => (
-          <div
-            key={c.chapter}
-            className={"qitem" + (view?.kind === "глава" && view.n === c.chapter ? " active" : "")}
-            onClick={() => setView({ kind: "глава", n: c.chapter })}
-          >
-            <div className="row">
-              <strong>Глава {c.chapter}</strong>
-              <span className={`badge b-${c.state}`}>{c.state}</span>
-            </div>
-            <div className="muted">
-              черновик {c.draft} · Э1: {c.e1} · Э2: {c.e2}
-              {c.author_min > 0 && <> · автор {c.author_min} мин</>}
-            </div>
-          </div>
-        ))}
-        {notStarted.map((b) => (
-          <div
-            key={b.chapter}
-            className={"qitem" + (view?.kind === "глава" && view.n === b.chapter ? " active" : "")}
-            onClick={() => setView({ kind: "глава", n: b.chapter })}
-          >
-            <div className="row">
-              <strong>Глава {b.chapter}</strong>
-              <span className="badge">не начата</span>
-            </div>
-            <div className="muted">том {b.volume} · фокал {b.focal}</div>
-          </div>
-        ))}
+        <div className="muted" style={{ margin: "6px 0" }} id="queue-title">Очередь глав</div>
+        <div role="list" aria-labelledby="queue-title">
+          {state.chapters.map((c) => (
+            <QueueItem key={c.chapter} active={isActive(c.chapter)} onOpen={() => setView({ kind: "глава", n: c.chapter })}>
+              <div className="row">
+                <strong>Глава {c.chapter}</strong>
+                <span className={`badge b-${c.state}`}>{c.state}</span>
+              </div>
+              <div className="muted">
+                черновик {c.draft} · Э1: {c.e1} · Э2: {c.e2}
+                {c.author_min > 0 && <> · автор {c.author_min} мин</>}
+              </div>
+            </QueueItem>
+          ))}
+          {notStarted.map((b) => (
+            <QueueItem key={b.chapter} active={isActive(b.chapter)} onOpen={() => setView({ kind: "глава", n: b.chapter })}>
+              <div className="row">
+                <strong>Глава {b.chapter}</strong>
+                <span className="badge">не начата</span>
+              </div>
+              <div className="muted">том {b.volume} · фокал {b.focal}</div>
+            </QueueItem>
+          ))}
+        </div>
       </aside>
 
       <main className="main">
@@ -147,7 +167,16 @@ export default function App() {
           </>
         )}
         {view?.kind === "журнал" && <ApiJournal />}
-        {view?.kind === "круги" && <Circles busy={busy} runCommand={runCommand} notify={notify} refreshTick={refreshTick} />}
+        {view?.kind === "круги" && (
+          <Circles
+            busy={running}
+            runCommand={runCommand}
+            notify={notify}
+            confirm={confirm}
+            refreshTick={refreshTick}
+            chapterCount={state.briefs.length}
+          />
+        )}
         {view?.kind === "поиск" && <SearchView q={view.q} notify={notify} />}
         {view?.kind === "глава" && (
           <ChapterView
@@ -157,15 +186,42 @@ export default function App() {
             refreshTick={refreshTick}
             runCommand={runCommand}
             notify={notify}
+            confirm={confirm}
           />
         )}
       </main>
 
-      {toast && (
-        <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>
-          {toast.text}
-        </div>
-      )}
+      {/* область объявлений существует всегда — так скринридер замечает появление текста */}
+      <div role="status" aria-live={toast?.kind === "err" ? "assertive" : "polite"} className="toast-region">
+        {toast && (
+          <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>
+            {toast.text}
+          </div>
+        )}
+      </div>
+      {confirmDialog}
+    </div>
+  );
+}
+
+/** Элемент очереди глав: доступен с клавиатуры (Tab, Enter/Space) — аудит 5.7. */
+function QueueItem({ active, onOpen, children }: { active: boolean; onOpen: () => void; children: ReactNode }) {
+  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onOpen();
+    }
+  };
+  return (
+    <div
+      role="listitem"
+      className={"qitem" + (active ? " active" : "")}
+      tabIndex={0}
+      aria-current={active ? "true" : undefined}
+      onClick={onOpen}
+      onKeyDown={onKey}
+    >
+      {children}
     </div>
   );
 }
