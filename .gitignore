@@ -65,3 +65,6 @@ panel/node_modules/
 /retest/
 .coverage
 htmlcov/
+
+# рабочие копии агентов
+/.claude/worktrees/
