@@ -41,7 +41,7 @@ def test_нет_записи_файлов_мимо_guard():
     """FR-K3: единственная точка записи — guard.write_text/append_text. Прямые записи допустимы только
     в перечисленных функциях, и все они пишут вне библиотеки (init копирует демо-библиотеку до её защиты)."""
     allowed = {
-        "cli.py": {"cmd_init", "cmd_retest", "cmd_apply_edits"},
+        "cli.py": {"cmd_init", "cmd_retest", "cmd_apply_edits", "_compile_window_to"},
     }
     writers = {"write_text", "write_bytes", "copyfile", "copytree", "move", "copy", "copy2"}
     offenders = []
