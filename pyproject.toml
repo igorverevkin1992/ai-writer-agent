@@ -8,8 +8,8 @@ version = "1.0.0"
 description = "КОНВЕЙЕР УГАР — производственный конвейер главы книжной серии (ТЗ v1.0)"
 requires-python = ">=3.11"
 dependencies = [
-    "typer>=0.9",
-    "pydantic>=2.5",
+    "typer>=0.12",
+    "pydantic>=2.7",
     "Jinja2>=3.1",
     "PyYAML>=6.0",
 ]

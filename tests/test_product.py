@@ -40,7 +40,6 @@ def test_status_карточка_главы(ws, monkeypatch):
     review.save_resolutions(ws, 1, [Resolution(flag_id="F-001")])
     r = runner.invoke(app, ["status", "1"])
     assert r.exit_code == 0
-    assert "верифицировано" not in r.output.split("Дальше")[0] or True
     assert "F-001" in r.output and "Без решения автора" in r.output
     assert "ugar verify1 1" in r.output
 
