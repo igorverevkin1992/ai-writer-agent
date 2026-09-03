@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -56,10 +58,31 @@ def check_write_allowed(path: Path) -> None:
 
 
 def write_text(path: Path, text: str) -> None:
-    """Единая точка записи текстовых файлов конвейера (UTF-8, NFR-8)."""
+    """Единая точка записи текстовых файлов конвейера (UTF-8, NFR-8).
+
+    Запись атомарна: сбой посреди записи (status.yaml, verdict.json, flags.json…)
+    не оставляет полуфайла — на диске либо старое содержимое, либо целиком новое.
+    """
     check_write_allowed(path)
+    write_atomic(path, text)
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Временный файл в той же папке + os.replace (атомарная подмена на POSIX и Windows)."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def append_text(path: Path, text: str) -> None:

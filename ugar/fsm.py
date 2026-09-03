@@ -39,6 +39,15 @@ TRANSITIONS: dict[str, set[str]] = {
 }
 
 
+# Артефакты, копия которых сохраняется за номером черновика при входе в состояние (NFR-4):
+# verdict.json/flags.json/diff_report.json остаются «текущими», verdict_k.json — историей повторов.
+DRAFT_ARTIFACTS: dict[str, tuple[str, ...]] = {
+    "верифицировано-1": ("verdict.json",),
+    "верифицировано-2": ("flags.json",),
+    "дифф-контроль": ("diff_report.json",),
+}
+
+
 class TransitionError(RuntimeError):
     pass
 
@@ -87,20 +96,42 @@ class ChapterState:
             )
         self._move(to, cmd)
 
-    def _move(self, to: str, cmd: str) -> None:
-        self.data["история"].append(
-            {"из": self.state, "в": to, "время": datetime.now(timezone.utc).isoformat(), "команда": cmd}
+    def _record(self, frm: str, to: str, cmd: str) -> None:
+        self.data.setdefault("история", []).append(
+            {"из": frm, "в": to, "время": datetime.now(timezone.utc).isoformat(), "команда": cmd}
         )
+
+    def _move(self, to: str, cmd: str) -> None:
+        self._record(self.state, to, cmd)
         self.data["состояние"] = to
         self._save()
+        self.snapshot_artifacts(*DRAFT_ARTIFACTS.get(to, ()))
+
+    def snapshot_artifacts(self, *names: str) -> list[Path]:
+        """Копия «текущего» артефакта под номером черновика: verdict.json → verdict_k.json (NFR-4).
+        Повторы (авто-повтор Э1, второй цикл правок) больше не затирают прошлые вердикты."""
+        chdir = self.ws.chapter_dir(self.chapter)
+        copies: list[Path] = []
+        for name in names:
+            src = chdir / name
+            if not src.exists():
+                continue
+            dst = chdir / f"{src.stem}_{self.draft}{src.suffix}"
+            guard.write_text(dst, src.read_text(encoding="utf-8"))
+            copies.append(dst)
+        return copies
 
     def set_draft(self, k: int) -> None:
         self.data["черновик"] = k
         self._save()
 
     def bump_retries(self) -> int:
+        """Авто-повтор Э1 (§5.4): брак метрик → новая генерация. Попадает в историю как
+        петля «сгенерировано → сгенерировано»; вердикт бракованного черновика сохраняется как verdict_k.json."""
         self.data["авто_повторов"] = int(self.data.get("авто_повторов", 0)) + 1
+        self._record(self.state, self.state, f"verify1 (авто-повтор №{self.data['авто_повторов']}, брак метрик)")
         self._save()
+        self.snapshot_artifacts("verdict.json")
         return self.data["авто_повторов"]
 
     def reset_retries(self) -> None:

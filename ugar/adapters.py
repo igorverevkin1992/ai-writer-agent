@@ -42,7 +42,9 @@ def _retryable(e: Exception) -> bool:
     status = getattr(e, "status_code", None)
     if status is None:
         status = getattr(getattr(e, "response", None), "status_code", None)
-    if isinstance(status, int):
+    if status is None:
+        status = getattr(e, "code", None)  # ошибки google-genai (APIError) несут HTTP-статус в .code
+    if isinstance(status, int) and not isinstance(status, bool):
         return status >= 500 or status in (408, 429)
     return True
 
@@ -103,7 +105,12 @@ def call_gemini(prompt: str, mc: ModelConfig, api: ApiConfig, logs_dir: Path, ch
         )
 
     def do():
-        client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=api.timeout_s * 1000))
+        # повторы — только наши (§6.3): встроенные ретраи SDK не умножаем (4.6)
+        http_kwargs: dict = {"timeout": api.timeout_s * 1000}
+        retry_options = getattr(types, "HttpRetryOptions", None)
+        if retry_options is not None:
+            http_kwargs["retry_options"] = retry_options(attempts=1)
+        client = genai.Client(api_key=key, http_options=types.HttpOptions(**http_kwargs))
         resp = client.models.generate_content(
             model=mc.model, contents=prompt, config=types.GenerateContentConfig(**mc.params)
         )
@@ -143,7 +150,8 @@ def call_anthropic(
         )
 
     def do():
-        client = anthropic.Anthropic(api_key=key, timeout=float(api.timeout_s))
+        # max_retries=0: повторы — только наши (§6.3), иначе до 3×3 попыток по 120 с (4.6)
+        client = anthropic.Anthropic(api_key=key, timeout=float(api.timeout_s), max_retries=0)
         resp = client.messages.create(
             model=mc.model,
             max_tokens=mc.params.get("max_tokens", 8192),
