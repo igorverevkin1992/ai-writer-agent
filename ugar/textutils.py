@@ -2,6 +2,11 @@
 
 Деление на предложения: регэксп по `.!?…` с обработкой прямой речи
 (тире-реплики) и словаря сокращений (пополняемый файл data/сокращения.txt).
+Абзац — блок строк до пустой строки; мягкие переносы строк внутри абзаца
+границей предложения не считаются. Инициалы («А. К. Штерн») — одно
+предложение; однобуквенные сокращения (`~с.`, `~д.` в словаре) действуют
+только перед цифрой или строчной буквой; одинокие заголовки «Глава пятая»
+предложениями не считаются.
 Метрики считаются по всему тексту, включая диалоги; исключаются только
 размеченные документы-вставки (Д-7): блок между строками
 `→ ДОКУМЕНТ` и `← КОНЕЦ ДОКУМЕНТА`.
@@ -23,17 +28,51 @@ _SENT_END_RE = re.compile(r"[.!?…]+[»«\"')\]]*")
 _ABBR_MASK = "\x01"  # непечатаемый маркер точки внутри сокращения
 
 
-def _load_abbreviations(extra_path: Path | None = None) -> list[str]:
-    text = resources.files("ugar").joinpath("data/сокращения.txt").read_text(encoding="utf-8")
-    abbrs = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+_CONTEXT_MARK = "~"  # префикс в словаре: сокращение действует только перед цифрой/строчной буквой
+# одинокий заголовок внутри прозы: «Глава пятая», «Часть II», «Пролог» — без терминатора
+_HEADING_RE = re.compile(r"^(?:Глава|Часть|Пролог|Эпилог)\b[^.!?…]*$", re.IGNORECASE)
+# инициал: одиночная заглавная буква с точкой перед следующим словом с заглавной («А. К. Штерн»)
+_INITIAL_RE = re.compile(r"(?<![А-Яа-яЁёA-Za-z])([А-ЯЁA-Z])\.(?=\s*[А-ЯЁA-Z])")
+
+
+def _load_abbreviations(extra_path: Path | None = None) -> list[tuple[str, bool]]:
+    """[(сокращение, контекстное)]; контекстное (`~с.`) маскируется только перед цифрой
+    или строчной буквой — иначе «с.» съедает границу предложения после слова на «с»."""
+    lines = resources.files("ugar").joinpath("data/сокращения.txt").read_text(encoding="utf-8").splitlines()
     if extra_path and extra_path.exists():
-        abbrs += [
-            ln.strip()
-            for ln in extra_path.read_text(encoding="utf-8").splitlines()
-            if ln.strip() and not ln.startswith("#")
-        ]
+        lines += extra_path.read_text(encoding="utf-8").splitlines()
+    abbrs: dict[str, bool] = {}
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        contextual = ln.startswith(_CONTEXT_MARK)
+        abbrs[ln.lstrip(_CONTEXT_MARK).strip()] = contextual
     # длинные раньше коротких, чтобы «т.д.» маскировалось до «д.»
-    return sorted(set(abbrs), key=len, reverse=True)
+    return sorted(abbrs.items(), key=lambda kv: len(kv[0]), reverse=True)
+
+
+def _mask_abbreviations(text: str, abbrs: list[tuple[str, bool]]) -> str:
+    for abbr, contextual in abbrs:
+        pattern = r"(?<![А-Яа-яЁёA-Za-z])" + re.escape(abbr)
+        if contextual:
+            pattern += r"(?=\s*[0-9а-яёa-z])"
+        text = re.sub(pattern, abbr.replace(".", _ABBR_MASK), text)
+    return _INITIAL_RE.sub(lambda m: m.group(1) + _ABBR_MASK, text)
+
+
+def paragraphs(text: str) -> list[str]:
+    """Абзацы: блоки строк, разделённые пустыми строками; переносы внутри блока — пробел."""
+    result: list[str] = []
+    block: list[str] = []
+    for line in text.splitlines() + [""]:
+        stripped = line.strip()
+        if stripped:
+            block.append(stripped)
+        elif block:
+            result.append(" ".join(block))
+            block = []
+    return result
 
 
 def strip_document_inserts(text: str) -> str:
@@ -64,15 +103,11 @@ def strip_markdown(text: str) -> str:
 def split_sentences(text: str, extra_abbr: Path | None = None) -> list[str]:
     """Деление на предложения по Д-2."""
     abbrs = _load_abbreviations(extra_abbr)
-    masked = text
-    for abbr in abbrs:
-        pattern = re.compile(r"(?<![А-Яа-яЁёA-Za-z])" + re.escape(abbr))
-        masked = pattern.sub(abbr.replace(".", _ABBR_MASK), masked)
     sentences: list[str] = []
-    for para in masked.splitlines():
-        para = para.strip()
-        if not para:
-            continue
+    for para in paragraphs(text):
+        if _HEADING_RE.match(para) and len(para.split()) <= 4:
+            continue  # «Глава пятая» — заголовок в теле прозы, не предложение
+        para = _mask_abbreviations(para, abbrs)
         # тире-реплики режем как обычные предложения; терминатор внутри слова
         # (десятичные числа) предложение не завершает
         start = 0

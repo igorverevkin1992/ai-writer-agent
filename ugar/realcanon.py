@@ -25,7 +25,60 @@ from .mdparse import MarkupError, cell
 from .schemas import Act, Brief, CircleStep, ContinuityEvent, Dossier, InfoBan, MatrixFact, Norm, Plant, StopRule, StoryCircle
 
 CH_RE = re.compile(r"[Гг]л\.?\s*(\d+)")
-VOL_RE = re.compile(r"[Тт]ом\w*\s*(\d+)|т\.?\s*(\d+)")
+# перечисление глав после одного «гл.»: «Гл. 9, 27», «Гл. 29 или 40», «гл. 34, 40»
+CH_LIST_RE = re.compile(r"[Гг]л\.?\s*(\d+(?:\s*(?:,|или|и|/)\s*\d+)*)")
+# том выстрела: «Том 2», «тома 9–10», «томов 2–5», «т.6»; «в томе N …» — оговорка, не выстрел
+VOL_RE = re.compile(
+    r"(?<!(?<![а-яё])[Вв]\s)[Тт]ом\w*\s*(\d+)(?:\s*[–-]\s*(\d+))?"
+    r"|(?<!(?<![а-яё])[Вв]\s)(?<![а-яё])т\.?\s*(\d+)(?:\s*[–-]\s*(\d+))?"
+)
+
+
+def chapters_listed(text: str) -> list[int]:
+    """Все главы из перечислений «гл. 9, 27» / «гл. 29 или 40» (аудит 3.1)."""
+    nums: list[int] = []
+    for m in CH_LIST_RE.finditer(text):
+        nums.extend(int(x) for x in re.findall(r"\d+", m.group(1)))
+    return list(dict.fromkeys(nums))
+
+
+def volumes_listed(text: str) -> list[int]:
+    """Тома выстрела с раскрытием диапазонов: «томов 2–5» → [2, 3, 4, 5]."""
+    vols: list[int] = []
+    for m in VOL_RE.finditer(text):
+        lo = int(m.group(1) or m.group(3))
+        hi = int(m.group(2) or m.group(4) or lo)
+        vols.extend(range(lo, hi + 1) if hi >= lo else [lo])
+    return list(dict.fromkeys(vols))
+
+
+# --------------------------------------------------- имена в тексте канона
+
+# падежные окончания имён: «Лемму», «Штерном», «Асю» (основа «Ас»), «куратору ОГПУ»
+_NAME_ENDINGS = "ами|ями|ой|ей|ом|ем|ым|им|ою|ею|ах|ях|ов|ев|а|я|у|ю|е|и|ы"
+_PSEUDO_SUBJECTS = {"Читатель"}  # субъект матрицы, не персонаж
+
+
+def name_pattern(name: str) -> re.Pattern:
+    """Регэксп имени в любом падеже и регистре: «Ася» → Ас(я|и|е|ю…), «Куратор ОГПУ» → куратор(у) ОГПУ."""
+    first, *rest = name.split()
+    stem = first[:-1] if len(first) > 2 and first[-1] in "аяь" else first
+    pat = rf"(?<![А-Яа-яЁё]){re.escape(stem)}(?:{_NAME_ENDINGS})?(?![А-Яа-яЁё])"
+    if rest:
+        pat += r"\s+" + r"\s+".join(re.escape(r) for r in rest)
+    return re.compile(pat, re.IGNORECASE)
+
+
+def find_names(text: str, known_names: set[str]) -> list[str]:
+    """Известные имена, встречающиеся в тексте (по основе, без учёта регистра); из пары
+    «Куратор» / «Куратор ОГПУ» остаётся более длинное, «Читатель» — не персонаж."""
+    found = {n for n in known_names if n not in _PSEUDO_SUBJECTS and name_pattern(n).search(text)}
+    result: set[str] = set()
+    for n in found:
+        # «куратор» без уточнения → единственное полное имя «Куратор ОГПУ» (субъект матрицы)
+        longer = [o for o in known_names if o != n and o.startswith(n + " ")]
+        result.add(longer[0] if len(longer) == 1 else n)
+    return sorted(result)
 
 
 # ------------------------------------------------------------------ нормы 02
@@ -158,6 +211,7 @@ def parse_anachronisms(path: Path) -> list[StopRule]:
     if sec is None:
         return []
     rules: list[StopRule] = []
+    banned: set[str] = set()
     for line in sec.body.splitlines():
         line = line.strip()
         forever = line.startswith("**Запрещено навсегда")
@@ -180,6 +234,14 @@ def parse_anachronisms(path: Path) -> list[StopRule]:
                     items=words, applies_to=applies, action="запрет",
                 )
             )
+            banned.update(w.lower() for w in words)
+    # Ж-3: слово со статусом ⚠ в прозе = флаг («глухарь ⚠», «мент ⚠» — ложные друзья и датировки)
+    flagged = [
+        w for w in dict.fromkeys(m.group(1) for m in re.finditer(r"([а-яё][а-яё-]*)\s*⚠", sec.body))
+        if w.lower() not in banned
+    ]
+    if flagged:
+        rules.append(StopRule(scope="0.4", rule_id="0.4-Е-⚠", items=flagged, applies_to={"all": True}, action="флаг"))
     return rules
 
 
@@ -215,21 +277,25 @@ def parse_registry_briefs(path: Path, known_names: set[str] | None = None) -> li
             ch = mdparse.parse_number(cell(row, "Гл"))
             if ch is None:
                 continue
-            focal = cell(row, "Фокал")
+            focal_raw = cell(row, "Фокал")
+            focal = focal_raw
             eyes = re.search(r"глазами\s+([А-ЯЁ][а-яё]+)", focal)
             if eyes:
                 focal = eyes.group(1)
+            focal = normalize_name(focal, known_names)
             event = cell(row, "Событие")
+            # участники сцены — известные имена из события и «X глазами Y» (аудит 3.5)
+            participants = [n for n in find_names(f"{focal_raw} · {event}", known_names) if n != focal]
             briefs.append(
                 Brief(
                     chapter=int(ch), volume=volume, year=year,
-                    focal=normalize_name(focal, known_names),
+                    focal=focal,
                     date=cell(row, "Дата"),
                     beats=[event] if event else [],
                     scenes=[],
                     not_knows=[],
                     bans=[],
-                    participants=[],
+                    participants=participants,
                     volume_words=None,
                     plants=[],
                 )
@@ -239,10 +305,15 @@ def parse_registry_briefs(path: Path, known_names: set[str] | None = None) -> li
 
 POGLAVNIK_HEAD_RE = re.compile(r"##\s*Гл\.?\s*(\d+)\s*·\s*([^·]+)·\s*фокал\s+([А-ЯЁ]+)", re.IGNORECASE)
 SCENE_RE = re.compile(r"\*\*Сц\.\s*[\d.]+\.?\*\*\s*(.+)")
+# «**→ ДОКУМЕНТ №1** (после главы): первый рапорт — …» → документ-вставка главы (аудит 3.6)
+DOCUMENT_RE = re.compile(r"\*\*→\s*ДОКУМЕНТ\s*№?\s*(\d+)\*\*\s*(?:\(([^)]*)\))?\s*:?\s*(.*)")
 
 
 def enrich_from_poglavnik(briefs: list[Brief], path: Path, known_names: set[str]) -> None:
-    """Обогащение брифов сценами и участниками из рабочего поглавника (23)."""
+    """Обогащение брифов сценами, участниками и документами-вставками из рабочего поглавника (23).
+
+    Сцена: место · участники · цель · входит/выходит · кладём — в бриф идут все поля,
+    кроме «кладём: …» (это биты); «входит:/выходит:» остаётся в строке сцены."""
     by_ch = {b.chapter: b for b in briefs}
     current: Brief | None = None
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -250,16 +321,18 @@ def enrich_from_poglavnik(briefs: list[Brief], path: Path, known_names: set[str]
         if m:
             current = by_ch.get(int(m.group(1)))
             continue
+        dm = DOCUMENT_RE.match(line.strip())
+        if dm and current is not None:
+            position = (dm.group(2) or "после главы").strip()
+            current.documents.append(f"№{dm.group(1)} ({position}): {dm.group(3).strip()}")
+            continue
         sm = SCENE_RE.match(line.strip())
         if sm and current is not None:
             scene = sm.group(1)
             parts = [p.strip() for p in scene.split("·")]
-            current.scenes.append(" · ".join(parts[:3]))
-            participants = {
-                name for name in known_names
-                if len(parts) > 1 and re.search(rf"(?<![А-Яа-яЁё]){name}", parts[1])
-            }
-            for name in sorted(participants):
+            current.scenes.append(" · ".join(p for p in parts if not p.lower().startswith("кладём")))
+            participants = find_names(parts[1], known_names) if len(parts) > 1 else []
+            for name in participants:
                 if name not in current.participants and name != current.focal:
                     current.participants.append(name)
             for chunk in parts:
@@ -325,13 +398,10 @@ def parse_plants_registry(path: Path) -> list[Plant]:
             continue
         for i, row in enumerate(table.rows, start=1):
             placed_raw = cell(row, "лежит")
-            chapters = [int(x) for x in CH_RE.findall(placed_raw)]
+            chapters = chapters_listed(placed_raw)  # «Гл. 9, 27» → обе главы (аудит 3.1)
             if re.search(r"[Пп]ролог", placed_raw):
                 chapters.insert(0, 0)
-            fires = []
-            for vm in VOL_RE.finditer(cell(row, "стреляет")):
-                vol = int(vm.group(1) or vm.group(2))
-                fires.append({"vol": vol})
+            fires = [{"vol": vol} for vol in volumes_listed(cell(row, "стреляет"))]
             plants.append(
                 Plant(
                     plant_id=f"З-{i:02d}",
@@ -345,11 +415,39 @@ def parse_plants_registry(path: Path) -> list[Plant]:
     return plants
 
 
+_NOT_MENTIONED_RE = re.compile(r"НЕ упомина\w*\s+в\s+томе\s*(\d+)", re.IGNORECASE)
+
+
+def parse_plant_bans(path: Path) -> list[InfoBan]:
+    """§7: строка «НЕ упоминается в томе N» (Красный Крест / Ватикан) — не закладка,
+    а запрет информрежима до тома N включительно: в окне — «НЕ упоминать» (аудит 1.5)."""
+    bans: list[InfoBan] = []
+    for table in mdparse.parse_tables(path):
+        headers = " ".join(table.headers).lower()
+        if "закладка" not in headers or "стреляет" not in headers:
+            continue
+        for i, row in enumerate(table.rows, start=1):
+            m = _NOT_MENTIONED_RE.search(cell(row, "лежит"))
+            if m:
+                bans.append(
+                    InfoBan(ban_id=f"З-{i:02d}", text=cell(row, "Закладка"), until_volume=int(m.group(1)), secret=False)
+                )
+    return bans
+
+
 # ------------------------------------------------------- континуити 33
 
 
+# ссылка «т.1 гл.4», «т.1 гл.1, 4», «гл.5» — где угодно в буллете; «т.8» без главы (статус) — не ссылка
+_CONT_REF_RE = re.compile(r"(?:т\.?\s*(\d+)\s*)?гл\.?\s*(\d+(?:\s*,\s*\d+)*)", re.IGNORECASE)
+NO_SOURCE = "без привязки"  # факт без ссылки на главу (открытое решение)
+
+
 def parse_continuity_bullets(path: Path) -> list[ContinuityEvent]:
-    """Буллеты «факт · т.X гл.Y · статус» по секциям трекера."""
+    """Буллеты «факт · т.X гл.Y · статус» по секциям трекера (аудит 3.7).
+
+    date — первая ссылка на источник («т.1 гл.4»; строки Э2 без пустых дат),
+    chapters — номера глав через запятую, note — последнее поле (статус)."""
     events: list[ContinuityEvent] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -358,13 +456,19 @@ def parse_continuity_bullets(path: Path) -> list[ContinuityEvent]:
         parts = [p.strip() for p in line[2:].split("·")]
         if len(parts) < 2:
             continue
-        chapters = "; ".join(p for p in parts[1:] if re.search(r"т\.?\s*\d|гл", p))
+        refs = list(_CONT_REF_RE.finditer(line))
+        chapters = list(dict.fromkeys(int(x) for m in refs for x in re.findall(r"\d+", m.group(2))))
+        if refs:
+            first = refs[0]
+            date = (f"т.{first.group(1)} " if first.group(1) else "") + "гл." + re.sub(r"\s*,\s*", ", ", first.group(2))
+        else:
+            date = NO_SOURCE
         events.append(
             ContinuityEvent(
-                date="",
+                date=date,
                 event=re.sub(r"\*\*", "", parts[0]),
-                chapters=re.sub(r"\*\*", "", chapters),
-                note=parts[-1] if len(parts) > 2 else "",
+                chapters=", ".join(str(c) for c in chapters),
+                note=re.sub(r"\*\*", "", parts[-1]) if len(parts) > 2 else "",
             )
         )
     return events
@@ -532,8 +636,12 @@ def parse_dossiers_real(paths: list[Path], known_names: set[str]) -> list[Dossie
 
             relations: dict[str, str] = {}
             rel_body = section(r"Отношени")
-            for rm in re.finditer(r"\[\[([^\]]+)\]\]\s*[—-]+\s*([^\[]+)", rel_body):
-                relations[rm.group(1).strip()] = rm.group(2).strip().rstrip(". ")
+            # «[[Лемм]] — описание.» и без тире: «[[Ася]], [[Бугаев]] («своя, из выдвиженок»).» (аудит 3.7)
+            for rm in re.finditer(r"\[\[([^\]]+)\]\]\s*(?:[—-]+\s*)?([^\[]*)", rel_body):
+                descr = rm.group(2).strip().strip(",;. ").strip()
+                if descr.startswith("(") and descr.endswith(")"):
+                    descr = descr[1:-1].strip()
+                relations[rm.group(1).strip()] = descr.rstrip(". ") or "(связь отмечена без пояснения)"
             dossiers.append(
                 Dossier(
                     name=name,

@@ -80,6 +80,8 @@ class Brief(BaseModel):
     not_knows: list[str] = Field(default_factory=list)  # явные «НЕ знает»
     volume_words: int | None = None
     plants: list[str] = Field(default_factory=list)     # plant_id, назначенные главе
+    # документы-вставки главы из поглавника («→ ДОКУМЕНТ №N (после главы): …»)
+    documents: list[str] = Field(default_factory=list)
 
 
 class Dossier(BaseModel):
