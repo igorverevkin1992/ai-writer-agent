@@ -61,13 +61,60 @@ def _norm_eq(a: str, b: str) -> bool:
     return a.strip().lower() == b.strip().lower()
 
 
-def _highlight(text_html: str, quote: str, cls: str, anchor: str, tooltip: str) -> str:
-    """Подсветка первого вхождения цитаты в уже экранированном тексте."""
-    q = _esc(quote.strip())
-    if not q or q not in text_html:
-        return text_html
-    mark = f'<mark id="{html.escape(anchor, quote=True)}" class="m-{html.escape(cls, quote=True)}" title="{html.escape(tooltip, quote=True)}">{q}</mark>'
-    return text_html.replace(q, mark, 1)
+# подсветка: (цитата, класс, якорь, тултип)
+Mark = tuple[str, str, str, str]
+
+
+def plan_marks(text: str, marks: list[Mark]) -> list[tuple[int, int, str, str, str]]:
+    """Позиции подсветок в СЫРОМ тексте (аудит 5.3).
+
+    Для каждой цитаты — первое вхождение; пересекающиеся и вложенные
+    отбрасываются: остаётся более ранняя, при равном начале — более длинная.
+    Повтор якоря (та же цитата дважды) тоже отбрасывается. Возвращает
+    (начало, конец, класс, якорь, тултип), отсортированные по началу.
+    Та же логика — в панели (panel/src/highlight.ts).
+    """
+    found = []
+    for order, (quote, cls, anchor, tooltip) in enumerate(marks):
+        q = quote.strip()
+        if not q:
+            continue
+        pos = text.find(q)
+        if pos < 0:
+            continue
+        found.append((pos, -len(q), order, cls, anchor, tooltip))
+    found.sort()
+    chosen: list[tuple[int, int, str, str, str]] = []
+    seen: set[str] = set()
+    end = 0
+    for pos, neg_len, _order, cls, anchor, tooltip in found:
+        stop = pos - neg_len
+        if pos < end or anchor in seen:
+            continue
+        chosen.append((pos, stop, cls, anchor, tooltip))
+        seen.add(anchor)
+        end = stop
+    return chosen
+
+
+def highlight(text: str, marks: list[Mark]) -> str:
+    """Экранированный текст с <mark> за один проход по позициям.
+
+    Поиск идёт по сырому тексту, а не по HTML: цитата, совпадающая с куском
+    тултипа или другой подсветки, не может попасть внутрь атрибута —
+    разметка остаётся корректной при любых пересечениях.
+    """
+    out: list[str] = []
+    cur = 0
+    for pos, stop, cls, anchor, tooltip in plan_marks(text, marks):
+        out.append(_esc(text[cur:pos]))
+        out.append(
+            f'<mark id="{html.escape(anchor, quote=True)}" class="m-{html.escape(cls, quote=True)}" '
+            f'title="{html.escape(tooltip, quote=True)}">{_esc(text[pos:stop])}</mark>'
+        )
+        cur = stop
+    out.append(_esc(text[cur:]))
+    return "".join(out)
 
 
 def build_review_html(ws: Workspace, chapter: int, draft: int) -> Path:
@@ -85,21 +132,16 @@ def build_review_html(ws: Workspace, chapter: int, draft: int) -> Path:
         for r in json.loads(res_path.read_text(encoding="utf-8")):
             resolutions[r["flag_id"]] = Resolution.model_validate(r)
 
-    # ---- текст с подсветкой
-    text_html = _esc(raw)
+    # ---- текст с подсветкой (один проход по позициям, см. highlight)
+    marks: list[Mark] = []
     for c in checks:
         if c.status == "PASS":
             continue
         for j, q in enumerate(c.quotes[:3]):
-            text_html = _highlight(
-                text_html, q, c.status, f"a-{c.check_id}-{j}",
-                f"{c.check_id}: порог {c.threshold}, факт {c.actual}",
-            )
+            marks.append((q, c.status, f"a-{c.check_id}-{j}", f"{c.check_id}: порог {c.threshold}, факт {c.actual}"))
     for f in flags:
-        text_html = _highlight(
-            text_html, f.quote, f.kind, f"a-{f.flag_id}",
-            f"{f.flag_id} · {f.type}: {f.rule}. {f.recommendation}",
-        )
+        marks.append((f.quote, f.kind, f"a-{f.flag_id}", f"{f.flag_id} · {f.type}: {f.rule}. {f.recommendation}"))
+    text_html = highlight(raw, marks)
 
     # ---- таблица Э1
     e1_rows = "".join(

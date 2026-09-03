@@ -92,7 +92,8 @@ def _chapters_block(ws: Workspace) -> str:
     )
 
 
-def build_dashboard(ws: Workspace) -> Path:
+def render_dashboard(ws: Workspace) -> str:
+    """HTML дашборда в памяти — панель отдаёт его по GET без записи на диск (аудит 4.3)."""
     metrics = _read_metrics(ws)
     chapters = [m["chapter"] for m in metrics]
     try:
@@ -188,6 +189,11 @@ def build_dashboard(ws: Workspace) -> Path:
 {''.join(figures)}
 </div></body></html>
 """
+    return page
+
+
+def build_dashboard(ws: Workspace) -> Path:
+    """`ugar dashboard`: пишет dashboard.html в рабочую область."""
     path = ws.root / "dashboard.html"
-    guard.write_text(path, page)
+    guard.write_text(path, render_dashboard(ws))
     return path

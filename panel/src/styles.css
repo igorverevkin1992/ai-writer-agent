@@ -33,6 +33,7 @@ select { font: inherit; background: var(--surface-2); color: var(--ink);
 
 .qitem { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; }
 .qitem:hover { border-color: var(--accent); }
+.qitem:focus-visible, .circle-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .qitem.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .qitem .row { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
 
@@ -84,10 +85,20 @@ th { background: var(--surface-2); }
 .editrow { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; border-bottom: 1px dashed var(--line); }
 .ok { color: var(--good); } .bad { color: var(--crit); }
 iframe.dash { width: 100%; height: calc(100vh - 120px); border: 1px solid var(--line); border-radius: 8px; }
-.toast { position: fixed; bottom: 18px; right: 18px; background: var(--crit); color: #fff;
-         padding: 10px 16px; border-radius: 9px; max-width: 440px; z-index: 10; }
-
+.toast-region { position: fixed; bottom: 18px; right: 18px; z-index: 10; }
+.toast { background: var(--crit); color: #fff; padding: 10px 16px; border-radius: 9px; max-width: 440px; cursor: pointer; }
 .toast.ok { background: var(--good); }
+
+/* модальное подтверждение (вместо window.confirm) */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 20;
+                  display: flex; align-items: center; justify-content: center; }
+.modal { background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 10px;
+         padding: 18px 22px; max-width: 520px; width: calc(100% - 40px); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3); }
+.modal h2 { margin: 0 0 8px; }
+.modal p { margin: 0 0 6px; white-space: pre-wrap; }
+.modal .actions { justify-content: flex-end; margin-bottom: 0; }
+
+.circle-head { display: flex; justify-content: space-between; cursor: pointer; }
 input.search { width: 100%; font: inherit; background: var(--surface); color: var(--ink);
                border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; }
 pre.window { border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 12px;

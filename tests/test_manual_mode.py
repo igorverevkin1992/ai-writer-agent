@@ -95,9 +95,13 @@ def test_панель_manual_flags_и_промпт(panel, ws):
     ws.draft_path(1, 1).write_text("Текст для проверки Э2.", encoding="utf-8")
     st.set_draft(1)
 
-    # промпт Э2 строится по требованию, без API
+    # промпт Э2 строится по требованию, без API; GET ничего не пишет (аудит 4.3),
+    # файл создаёт POST — его и зовёт кнопка копирования в панели
     data = _get(panel, "/api/chapter/1/prompt/verify2")
-    assert "ТЕКСТ ГЛАВЫ" in data["text"] and (ws.chapter_dir(1) / "verify2_prompt.md").exists()
+    assert "ТЕКСТ ГЛАВЫ" in data["text"] and not (ws.chapter_dir(1) / "verify2_prompt.md").exists()
+    code, data = _post(panel, "/api/chapter/1/prompt/verify2", {})
+    assert code == 200 and "ТЕКСТ ГЛАВЫ" in data["text"]
+    assert (ws.chapter_dir(1) / "verify2_prompt.md").exists()
 
     # ответ модели с прозой вокруг JSON принимается
     raw = 'Вот результат проверки:\n[{"flag_id": "F-001", "type": "бриф", "quote": "Текст", "rule": "проверка"}]'

@@ -22,9 +22,11 @@ export interface Job {
   name: string;
   chapter: number | null;
   status: "выполняется" | "готово" | "ошибка" | "ручной-режим";
-  output: string;
   started: string;
   finished?: string;
+  output_tail: string; // хвост лога (в /api/state — без полного вывода, 5.5)
+  output_len: number;
+  output?: string; // полный лог — только /api/job
 }
 
 export interface AppState {
