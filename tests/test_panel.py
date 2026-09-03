@@ -67,7 +67,7 @@ def test_state_и_статика(panel):
     assert state["models"]["writer"]
 
     status, body = _get(f"{panel}/")
-    assert status == 200 and b"<!DOCTYPE html>" in body[:100] or b"<!doctype html>" in body[:100].lower()
+    assert status == 200 and (b"<!DOCTYPE html>" in body[:100] or b"<!doctype html>" in body[:100].lower())
 
 
 def test_пост_без_заголовка_блокирован(panel):

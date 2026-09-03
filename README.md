@@ -171,7 +171,7 @@ ugar canonize 7 --apply   # правки MD + export + атомарный git-к
   `ugar/data/панель/` и раздаётся сервером `ugar/server.py` (`ugar panel`).
 
 ```bash
-python -m pytest tests/    # 125 тестов
+python -m pytest tests/    # 215 тестов
 ```
 
 ## Соответствие этапности ТЗ
