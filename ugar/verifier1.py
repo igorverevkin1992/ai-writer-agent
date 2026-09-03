@@ -410,6 +410,72 @@ def analyze(
 # ------------------------------------------------------- FR-V1.10 дифф-контроль
 
 
+def _norm_ws(s: str) -> str:
+    return " ".join(s.split())
+
+
+def _edit_text(s: str) -> str:
+    return _norm_ws(textutils.strip_markdown(s))
+
+
+def _expected_sentences(old_sents: list[str], edits: list[Edit]) -> tuple[set[str], set[str], list[str], list[str]]:
+    """Что должно получиться из старых предложений после правок:
+    (ожидаемые новые предложения, объяснённые старые, тексты «стало», тексты «было»)."""
+    expected_new: set[str] = set()
+    explained_old: set[str] = set()
+    afters = [_edit_text(e.after) for e in edits if e.after.strip()]
+    befores = [_edit_text(e.before) for e in edits if e.before.strip()]
+    for e in edits:
+        b, a = _edit_text(e.before), _edit_text(e.after)
+        if not b:
+            continue
+        for s in old_sents:
+            sn = _norm_ws(s)
+            if b in sn:
+                explained_old.add(sn)
+                # «стало» может быть пустым (удаление) или из нескольких предложений
+                expected_new.update(_norm_ws(x) for x in textutils.split_sentences(sn.replace(b, a)))
+    return expected_new, explained_old, afters, befores
+
+
+def waive_unauthorized(ws: Workspace, chapter: int, report: DiffReport, fragments: list[str]) -> tuple[list[str], list[str]]:
+    """Авторская правка (`diff-check --авторская-правка`): снимает самоволия и ПИШЕТ в diff_report.json,
+    что именно снято. Без перечня — снимаются все (как прежде); с перечнем `--фрагмент` — только
+    совпавшие (номер в списке самоволий или подстрока текста). Возвращает (снято, не найдено)."""
+    waived: list[str] = []
+    missing: list[str] = []
+    if not fragments:
+        waived = list(report.unauthorized)
+        report.unauthorized = []
+    else:
+        for frag in fragments:
+            frag = frag.strip()
+            hit = None
+            if frag.isdigit() and 1 <= int(frag) <= len(report.unauthorized):
+                hit = report.unauthorized[int(frag) - 1]
+            else:
+                hit = next((u for u in report.unauthorized if frag and _norm_ws(frag) in _norm_ws(u)), None)
+            if hit is None:
+                missing.append(frag)
+            elif hit not in waived:
+                waived.append(hit)
+        report.unauthorized = [u for u in report.unauthorized if u not in waived]
+    guard.write_text(
+        ws.chapter_dir(chapter) / "diff_report.json",
+        json.dumps(
+            {
+                **report.model_dump(),
+                "примечание": "ручная правка автора",
+                "авторская_правка": {"снято": waived, "фрагменты": list(fragments), "не_найдено": missing},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+    )
+    return waived, missing
+
+
 def diff_check(ws: Workspace, chapter: int, draft_before: int, draft_after: int, edits: list[Edit]) -> DiffReport:
     """Сопоставление черновиков до/после правок: внесено / не внесено / самоволия.
 
@@ -419,36 +485,57 @@ def diff_check(ws: Workspace, chapter: int, draft_before: int, draft_after: int,
     """
     old = ws.draft_path(chapter, draft_before).read_text(encoding="utf-8")
     new = ws.draft_path(chapter, draft_after).read_text(encoding="utf-8")
+    old_n, new_n = _norm_ws(old), _norm_ws(new)
 
     verifiable = [e for e in edits if e.before.strip()]
     unverifiable = [e.seq for e in edits if not e.before.strip()]
     applied = 0
     not_applied: list[int] = []
     for e in verifiable:
-        ok_removed = e.before not in new
-        ok_added = (not e.after.strip()) or (e.after in new)
-        if ok_removed and ok_added:
+        before, after = e.before.strip(), e.after.strip()
+        before_n, after_n = _norm_ws(before), _norm_ws(after)
+        # по счётчикам вхождений (2.5): цитата, встречающаяся в тексте дважды, после правки
+        # одного места встречается на один раз меньше — это «внесено», а не «не внесено»
+        if after and before_n in after_n:
+            # «стало» содержит «было» (дописано продолжение): число «было» не меняется —
+            # считаем появление самого «стало»
+            ok = (new.count(after) - old.count(after) >= 1) or (new_n.count(after_n) - old_n.count(after_n) >= 1)
+        else:
+            ok_removed = (old.count(before) - new.count(before) >= 1) or (old_n.count(before_n) - new_n.count(before_n) >= 1)
+            ok_added = (not after) or (after in new) or (after_n in new_n)
+            ok = ok_removed and ok_added
+        if ok:
             applied += 1
         else:
             not_applied.append(e.seq)
 
-    # самовольные изменения: изменённые фрагменты, не объяснимые ни одной правкой
-    unauthorized: list[str] = []
+    # самовольные изменения — по КАЖДОМУ изменённому предложению (2.5), а не по блоку difflib:
+    # блок из двух предложений, где правкой объяснено одно, второе не «отмывает»
     old_sents = textutils.split_sentences(textutils.strip_markdown(old))
     new_sents = textutils.split_sentences(textutils.strip_markdown(new))
+    expected_new, explained_old, afters, befores = _expected_sentences(old_sents, edits)
+
+    def new_explained(s: str) -> bool:
+        sn = _norm_ws(s)
+        return sn in expected_new or any(a in sn or sn in a for a in afters)
+
+    def old_explained(s: str) -> bool:
+        sn = _norm_ws(s)
+        return sn in explained_old or any(sn in b for b in befores)
+
+    unauthorized: list[str] = []
     sm = difflib.SequenceMatcher(a=old_sents, b=new_sents, autojunk=False)
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             continue
-        old_frag = " ".join(old_sents[i1:i2])
-        new_frag = " ".join(new_sents[j1:j2])
-        explained = any(
-            (e.before.strip() and e.before.strip() in old_frag)
-            or (e.after.strip() and e.after.strip() in new_frag)
-            for e in edits
-        )
-        if not explained:
-            unauthorized.append(new_frag or f"[удалено]: {old_frag}")
+        rogue = [s for s in new_sents[j1:j2] if not new_explained(s)]
+        unauthorized.extend(rogue)
+        if not rogue:
+            # новые предложения объяснены — но не исчезло ли старое без правки?
+            kept = {_norm_ws(s) for s in new_sents[j1:j2]}
+            unauthorized.extend(
+                f"[удалено]: {s}" for s in old_sents[i1:i2] if not old_explained(s) and _norm_ws(s) not in kept
+            )
 
     report = DiffReport(
         chapter=chapter,

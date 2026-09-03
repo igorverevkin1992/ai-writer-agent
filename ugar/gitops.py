@@ -46,6 +46,13 @@ def commit_all(repo: Path, message: str, author: str | None = None) -> str | Non
     return head(repo)
 
 
+def restore_library(repo: Path) -> None:
+    """Откат незакоммиченных изменений ТОЛЬКО в папке библиотеки (сбой apply_batch, 2.6):
+    отслеживаемые файлы — к HEAD, новые файлы и папки — удаляются; остальной репозиторий не трогается."""
+    _git(repo, "checkout", "--", ".")
+    _git(repo, "clean", "-fd", "--", ".")
+
+
 def check_norm_change_message(message: str) -> bool:
     """Сценарий Б: изменение норм — только со ссылкой Р-№ в сообщении (предупреждение)."""
     return bool(re.search(r"Р-\d+", message))

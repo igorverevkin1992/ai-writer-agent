@@ -7,13 +7,17 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .paths import Workspace
+
+# Д-8: git принимает --author только в виде «Имя <email>»
+COMMIT_AUTHOR_RE = re.compile(r"^[^<>]*\S\s+<[^<>@\s]+@[^<>@\s]+>$")
 
 
 class ModelConfig(BaseModel):
@@ -42,6 +46,20 @@ class Config(BaseModel):
     edit_cycle_max_iterations: int = 3     # FR-E3: ≤3 итераций
     commit_author: str | None = None       # Д-8: авторство коммита — автор ("Имя <email>")
     backup_remotes_min: int = 2            # NFR-6
+
+    @field_validator("commit_author")
+    @classmethod
+    def _commit_author_format(cls, v: str | None) -> str | None:
+        """Неверный формат сорвал бы коммит приёмки уже ПОСЛЕ записи в библиотеку (2.6) —
+        проверяем при загрузке конфига, до любой записи."""
+        if v is None or not str(v).strip():
+            return None
+        v = str(v).strip()
+        if not COMMIT_AUTHOR_RE.match(v):
+            raise ValueError(
+                f"commit_author в config.yaml должен иметь вид «Имя <email>», получено: «{v}» (Д-8)."
+            )
+        return v
 
 
 def load_config(ws: Workspace) -> Config:

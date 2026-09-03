@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +31,7 @@ from . import (
     writer,
 )
 from .config import Config, library_dir, load_config
-from .fsm import ChapterState, TransitionError, all_states
+from .fsm import STATES, ChapterState, TransitionError, all_states
 from .mdparse import MarkupError
 from .paths import Workspace, find_workspace
 from .schemas import GoldenTest
@@ -63,7 +65,8 @@ def _manual(e: adapters.ManualModeNeeded) -> None:
 
 def _friendly(fn):
     """Ожидаемые ошибки (нет файла, структура MD, недопустимый переход FSM) —
-    читаемое сообщение вместо трейсбека."""
+    читаемое сообщение вместо трейсбека. UGAR_DEBUG=1 — полный трейсбек (для разбора
+    программных ошибок, 2.11)."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -72,8 +75,12 @@ def _friendly(fn):
         except (typer.Exit, typer.Abort):
             raise  # собственные коды выхода — не ошибка
         except adapters.ManualModeNeeded as e:
+            if os.environ.get("UGAR_DEBUG") == "1":
+                raise
             _manual(e)
         except (FileNotFoundError, MarkupError, TransitionError, RuntimeError, ValueError) as e:
+            if os.environ.get("UGAR_DEBUG") == "1":
+                raise
             _fail(str(e))
 
     return wrapper
@@ -307,20 +314,28 @@ def cmd_diff_check(
     author_fix: bool = typer.Option(
         False, "--авторская-правка", "--author-fix", help="Текущий черновик правил сам автор — расхождения не самоволия."
     ),
+    fragments: list[str] | None = typer.Option(
+        None, "--фрагмент", "--fragment",
+        help="С --авторская-правка: снять только эти самоволия (номер в списке или подстрока текста); можно несколько раз.",
+    ),
 ) -> None:
     """Дифф-контроль до/после правок (FR-V1.10, FR-E3)."""
     ws, cfg, lib = _ctx()
+    if not isinstance(fragments, list):  # прямой вызов из панели без аргумента (typer.OptionInfo)
+        fragments = []
     st = ChapterState(ws, chapter)
     st.require("правки", "дифф-контроль")  # повторный прогон/подтверждение разрешён
     edits = review_mod.load_edits(ws, chapter)
     base = int(st.data.get("база_правок", st.draft - 1))
     report = verifier1.diff_check(ws, chapter, base, st.draft, edits)
     if author_fix and report.unauthorized:
-        report.unauthorized = []
-        guard.write_text(
-            ws.chapter_dir(chapter) / "diff_report.json",
-            json.dumps({**report.model_dump(), "примечание": "ручная правка автора"}, ensure_ascii=False, indent=2) + "\n",
-        )
+        # 2.5: снятые самоволия фиксируются в diff_report.json; с --фрагмент — только перечисленные
+        waived, missing = verifier1.waive_unauthorized(ws, chapter, report, fragments)
+        typer.secho(f"Авторская правка: снято самоволий {len(waived)}.", fg=typer.colors.YELLOW)
+        if missing:
+            typer.secho(f"⚠ Не найдены среди самоволий: {missing}", fg=typer.colors.YELLOW)
+    elif fragments and not author_fix:
+        typer.secho("⚠ --фрагмент действует только вместе с --авторская-правка.", fg=typer.colors.YELLOW)
     st.transition("дифф-контроль", "diff-check")
     typer.echo(f"Внесено правок: {report.applied_share:.0%}; не внесено: {report.not_applied or '—'}")
     if report.unverifiable:
@@ -374,21 +389,42 @@ def cmd_canonize(
     chapter: int,
     apply: bool = typer.Option(False, "--apply", help="Применить подписанный пакет (правки MD + export + git-коммит)."),
     yes: bool = typer.Option(False, "--yes", "-y"),
+    redo: bool = typer.Option(False, "--заново", "--redo", help="Пересобрать пакет, даже если автор его уже правил (правки пропадут)."),
 ) -> None:
     """Канонист: пакет записей в канон (FR-K1); применение — только после подписи (FR-K2)."""
     ws, cfg, lib = _ctx()
+    if not isinstance(redo, bool):  # прямой вызов из панели без аргумента (typer.OptionInfo)
+        redo = False
     st = ChapterState(ws, chapter)
     st.require("принято")
+    batch_path = ws.chapter_dir(chapter) / "canon_batch.md"
     if not apply:
+        if batch_path.exists() and not redo:
+            # 2.11: отредактированный автором пакет не перезаписывается (и вызов LLM не тратится)
+            current = _sha256(batch_path)
+            if st.data.get("пакет_хэш") != current:
+                _fail(
+                    f"пакет chapters/{chapter:03d}/canon_batch.md уже правился автором — "
+                    f"примените его (`ugar canonize {chapter} --apply`) или пересоберите явно "
+                    f"(`ugar canonize {chapter} --заново`, правки пропадут)."
+                )
         try:
             path = canonist.build_batch(ws, cfg, chapter, st.draft)
         except RuntimeError as e:
             _fail(str(e))
+        st.data["пакет_хэш"] = _sha256(path)
+        st._save()
         typer.secho(f"Пакет на подпись: {path}", fg=typer.colors.GREEN)
         typer.echo(f"Проверьте/поправьте пакет и примените: `ugar canonize {chapter} --apply`.")
         return
-    if not (ws.chapter_dir(chapter) / "canon_batch.md").exists():
+    if not batch_path.exists():
         _fail(f"нет пакета canon_batch.md — сначала `ugar canonize {chapter}`.")
+    if not gitops.is_repo(lib):
+        # 2.6: без git нет коммита приёмки и отката — отказ ДО записи и без перевода FSM
+        _fail(
+            "библиотека не под git — применение пакета невозможно (FR-K2: откат только git-revert'ом). "
+            "Инициализируйте репозиторий в библиотеке (git init; git add -A; git commit), затем повторите."
+        )
     if not yes and not typer.confirm(
         f"Применить пакет главы {chapter} к УГАР_Библиотека/ и закоммитить? (Д-8) (y)"
     ):
@@ -810,10 +846,16 @@ def cmd_doctor() -> None:
     item(has_module("google.genai"), "SDK google-genai", "pip install 'ugar-pipeline[llm]'")
     item(has_module("anthropic"), "SDK anthropic", "pip install 'ugar-pipeline[llm]'")
     green = regression_mod.is_green(ws)
-    item(green, "регрессия зелёная" if green is not None else "регрессия ещё не запускалась",
-         "`ugar regress`" if green is None else "пропущенные флаги блокируют смену конфигурации (FR-R3)")
+    if green is None:
+        label = (
+            "отчёт регрессии устарел (изменились config.yaml, шаблоны или нормы)"
+            if regression_mod.is_stale(ws) else "регрессия ещё не запускалась"
+        )
+    else:
+        label = "регрессия зелёная" if green else "регрессия КРАСНАЯ"
+    item(green, label, "`ugar regress`" if green is None else "пропущенные флаги блокируют смену конфигурации (FR-R3)")
     n_tests = len(regression_mod.load_tests(ws)) if ws.regression.exists() else 0
-    item(n_tests > 0, f"золотых тестов: {n_tests}", "пополните корпус: `ugar add-golden` (FR-R1)")
+    item(n_tests > 0, f"золотых тестов: {n_tests}", "корпус пуст — регрессия не может быть зелёной; пополните: `ugar add-golden` (FR-R1)")
 
 
 @app.command("rollback", rich_help_panel="Канон и бэкап")
@@ -823,16 +865,17 @@ def cmd_rollback(
     to: str | None = typer.Option(None, "--to", help="Целевое состояние (§5.4); без него — на один шаг назад."),
     yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Откат главы в предыдущее состояние (сценарий Г); без --to — на шаг назад по истории."""
+    """Откат главы в предыдущее состояние (сценарий Г); без --to — на шаг назад по цепочке состояний §5.4."""
     ws, cfg, lib = _ctx()
-    if to is None:
-        history = ChapterState(ws, chapter).data.get("история", [])
-        prev = next((h["из"] for h in reversed(history) if h["из"] != h["в"]), None)
-        if prev is None:
-            _fail("история главы пуста — укажите цель отката явно: --to <состояние>.")
-        to = prev
-        typer.echo(f"Откат на шаг назад: → «{to}».")
     st = ChapterState(ws, chapter)
+    if to is None:
+        # 2.11: «предыдущее» — по цепочке STATES, а не по истории (после отката история
+        # указывала бы вперёд, а не назад)
+        idx = STATES.index(st.state)
+        if idx == 0:
+            _fail(f"глава {chapter} ещё не начата — откатывать некуда.")
+        to = STATES[idx - 1]
+        typer.echo(f"Откат на шаг назад: «{st.state}» → «{to}».")
     if st.state == "зафиксировано":
         # только git-revert коммита приёмки с пересчётом выгрузок и корпуса
         sha = st.data.get("коммит_приёмки") or gitops.find_chapter_commit(lib, chapter)
@@ -872,6 +915,17 @@ def cmd_regress(llm: bool = typer.Option(False, "--llm", help="Включить 
     """Прогон регрессионного корпуса золотых тестов (FR-R2)."""
     ws, cfg, lib = _ctx()
     report = regression_mod.run_regression(ws, llm=llm, cfg=cfg)
+    if not report["всего"]:
+        typer.secho(
+            "⚠ Корпус золотых тестов ПУСТ (regression/golden/) — регрессия ничего не проверила и зелёной "
+            "считаться не может (FR-R3). Пополните корпус: `ugar add-golden` (FR-R1).",
+            fg=typer.colors.YELLOW,
+        )
+    elif not report.get("выполнено"):
+        typer.secho(
+            "⚠ Ни один тест не выполнен (все Э2 пропущены: нужен --llm и ключ API) — регрессия не зелёная.",
+            fg=typer.colors.YELLOW,
+        )
     for r in report["результаты"]:
         if r.get("skipped"):
             typer.echo(f"  ~ {r['test_id']}: пропущен ({r['skipped']})")
@@ -883,7 +937,12 @@ def cmd_regress(llm: bool = typer.Option(False, "--llm", help="Включить 
     if report["зелёная"]:
         typer.secho("Регрессия ЗЕЛЁНАЯ.", fg=typer.colors.GREEN)
     else:
-        typer.secho(f"Регрессия КРАСНАЯ: {report['провалено']} (FR-R3: смена конфигурации заблокирована).", fg=typer.colors.RED)
+        why = report.get("причина") or "пропущены ожидаемые флаги"
+        typer.secho(
+            f"Регрессия КРАСНАЯ: {why}{' ' + str(report['провалено']) if report['провалено'] else ''} "
+            "(FR-R3: смена конфигурации заблокирована).",
+            fg=typer.colors.RED,
+        )
         raise typer.Exit(code=1)
 
 
@@ -976,8 +1035,14 @@ def cmd_retest(
     """Пере-тест моделей (сценарий В, Д-10): пакет раунда 1 протокола отбора; прогон полуручной."""
     ws, cfg, lib = _ctx()
     if fix:
-        if regression_mod.is_green(ws) is not True:
-            _fail("фиксация retest запрещена: регрессия не зелёная (FR-R3). Сначала `ugar regress`.")
+        green = regression_mod.is_green(ws)
+        if green is not True:
+            why = (
+                "регрессия КРАСНАЯ" if green is False
+                else "отчёт регрессии устарел (изменились config.yaml, шаблоны или нормы)"
+                if regression_mod.is_stale(ws) else "регрессия не запускалась"
+            )
+            _fail(f"фиксация retest запрещена: {why} (FR-R3). Сначала `ugar regress` с непустым корпусом.")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
         guard.write_text(
             ws.root / "retest" / stamp / "журнал_запись.md",
@@ -988,10 +1053,10 @@ def cmd_retest(
         typer.secho(f"Черновик записи журнала: retest/{stamp}/журнал_запись.md — внесите в 3.6 (сценарий Б).", fg=typer.colors.GREEN)
         return
     exporter.run_export(lib, ws.exports, ws.logs)
-    _, _ = compiler.compile_window(ws, lib, chapter, cfg.window_soft_limit_chars)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     dest = ws.root / "retest" / stamp
-    shutil.copyfile(ws.window_path(chapter), _ensure_dir(dest / "ПРОМПТ_раунд1.md"))
+    # 2.10: окно собирается во временную рабочую область — window.md главы в работе не трогается
+    _compile_window_to(ws, cfg, lib, chapter, _ensure_dir(dest / "ПРОМПТ_раунд1.md"))
     proto = sorted(lib.glob("Тест_Писателя/ПРОТОКОЛ_ОТБОРА.md"))
     if proto:
         shutil.copyfile(proto[0], dest / "ПРОТОКОЛ_ОТБОРА.md")
@@ -1006,6 +1071,29 @@ def cmd_retest(
 def _ensure_dir(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _compile_window_to(ws: Workspace, cfg: Config, lib: Path, chapter: int, target: Path) -> Path:
+    """Собирает окно главы во временную рабочую область (копия выгрузок и шаблонов) и кладёт
+    результат в target: chapters/N/window.md главы в работе остаётся нетронутым (2.10)."""
+    tmp_root = target.parent / "_сборка_окна"
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root)
+    (tmp_root / "exports").mkdir(parents=True)
+    for f in ws.exports.glob("*.json"):
+        shutil.copyfile(f, tmp_root / "exports" / f.name)
+    if ws.templates.exists():
+        shutil.copytree(ws.templates, tmp_root / "templates")
+    try:
+        path, _ = compiler.compile_window(Workspace(tmp_root), lib, chapter, cfg.window_soft_limit_chars)
+        shutil.copyfile(path, target)
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+    return target
 
 
 @app.command("canon-commit", rich_help_panel="Канон и бэкап")
@@ -1042,6 +1130,9 @@ def cmd_canon_commit(
     if not yes and not typer.confirm(f"Закоммитить изменения библиотеки: «{message}»? (Д-8) (y)"):
         raise typer.Exit()
     commit = gitops.commit_all(lib, message, author=cfg.commit_author)
+    if commit is None:
+        typer.echo("В библиотеке нет изменений — коммитить нечего.")
+        return
     typer.secho(f"Канон закоммичен: {commit}", fg=typer.colors.GREEN)
 
 

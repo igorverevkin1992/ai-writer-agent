@@ -73,37 +73,126 @@ def build_review_pack(ws: Workspace, chapter: int, draft: int) -> Path:
                 [
                     f"# Правки автора · Глава {chapter}",
                     "",
-                    "Формат пары (разделитель `→` на отдельной строке между «было» и «стало»):",
+                    "Формат пары — две строки, маркеры в начале строки (значение может занимать несколько строк):",
                     "",
                     "```",
                     "БЫЛО: точная цитата из текста",
                     "СТАЛО: новая формулировка",
                     "```",
                     "",
-                    "Свободные указания — строками, начинающимися с `УКАЗАНИЕ:`.",
+                    "Пустое `СТАЛО:` — удалить цитату. Свободные указания — строками, начинающимися с `УКАЗАНИЕ:`.",
+                    "Правки разделяйте пустой строкой.",
                     "",
                 ]
             )
             + "\n",
         )
 
-    # форма решений по самоволкам (FR-V2.5)
-    resolutions = [Resolution(flag_id=f.flag_id).model_dump() for f in samovolki]
-    res_path = chdir / "resolutions.json"
-    if not res_path.exists() or samovolki:
-        existing: dict[str, dict] = {}
-        if res_path.exists():
-            existing = {r["flag_id"]: r for r in json.loads(res_path.read_text(encoding="utf-8"))}
-        merged = [existing.get(r["flag_id"], r) for r in resolutions]
-        guard.write_text(res_path, json.dumps(merged, ensure_ascii=False, indent=2) + "\n")
+    # форма решений по самоволкам (FR-V2.5): пересобирается по ТЕКУЩЕМУ flags.json при каждом
+    # review (2.9) — решения по флагам, которые остались, сохраняются; исчезнувшие флаги
+    # («фантомные самоволки» прошлого прогона Э2) не блокируют приёмку
+    rebuild_resolutions(ws, chapter, samovolki)
     return chdir / "review.md"
 
 
-# «СТАЛО» может занимать несколько строк — до пустой строки, следующего «БЫЛО:» или конца файла
-_PAIR_RE = re.compile(
-    r"БЫЛО:\s*(?P<before>.+?)\s*\nСТАЛО:\s*(?P<after>.+?)(?=\n\s*\n|\nБЫЛО:|\Z)", re.DOTALL
-)
-_FREE_RE = re.compile(r"^УКАЗАНИЕ:\s*(.+)$", re.MULTILINE)
+def rebuild_resolutions(ws: Workspace, chapter: int, samovolki: list[Flag]) -> list[Resolution]:
+    res_path = ws.chapter_dir(chapter) / "resolutions.json"
+    existing: dict[str, Resolution] = {}
+    if res_path.exists():
+        existing = {r.flag_id: r for r in load_resolutions(ws, chapter)}
+    merged = [existing.get(f.flag_id, Resolution(flag_id=f.flag_id)) for f in samovolki]
+    save_resolutions(ws, chapter, merged)
+    return merged
+
+
+# ------------------------------------------------------------ разбор edits.md
+
+
+class EditsFormatError(ValueError):
+    """Ошибка формата edits.md с номером строки (FR-E2)."""
+
+    def __init__(self, path: Path, line: int, message: str):
+        super().__init__(f"{path.name}:{line}: {message}")
+        self.path = path
+        self.line = line
+
+
+_MARKER_RE = re.compile(r"^\s*(?P<kind>БЫЛО|СТАЛО|УКАЗАНИЕ)\s*:\s?(?P<rest>.*)$")
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+
+
+def parse_edits_text(text: str, chapter: int, path: Path | None = None) -> list[Edit]:
+    """Построчный автомат (2.4): маркеры `БЫЛО:` / `СТАЛО:` / `УКАЗАНИЕ:` в начале строки;
+    значение — до следующего маркера или пустой строки (многострочные цитаты допустимы);
+    пустое «СТАЛО» = удаление цитаты; «БЫЛО» без «СТАЛО» — ошибка с номером строки;
+    «УКАЗАНИЕ» сразу после пары — отдельная правка, а не хвост «СТАЛО».
+    """
+    src = path or Path("edits.md")
+    # примеры формата в ограждённых код-блоках — не правки; номера строк сохраняем
+    text = _FENCE_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    edits: list[Edit] = []
+    state = "idle"  # idle | before | before_done | after | note
+    before_lines: list[str] = []
+    value: list[str] = []
+    before_line = 0
+
+    def emit_pair() -> None:
+        edits.append(Edit(chapter=chapter, seq=len(edits) + 1, before="\n".join(before_lines).strip(),
+                          after="\n".join(value).strip()))
+
+    def emit_note() -> None:
+        note = "\n".join(value).strip()
+        if note:
+            edits.append(Edit(chapter=chapter, seq=len(edits) + 1, before="", after=note, note="свободное указание"))
+
+    def flush() -> None:
+        nonlocal state
+        if state == "after":
+            emit_pair()
+        elif state == "note":
+            emit_note()
+        state = "idle"
+
+    def require_after(n: int, what: str) -> None:
+        if state in ("before", "before_done"):
+            raise EditsFormatError(src, n, f"{what}: у «БЫЛО:» (строка {before_line}) нет своего «СТАЛО:»")
+
+    for n, line in enumerate(text.splitlines(), start=1):
+        m = _MARKER_RE.match(line)
+        if m:
+            kind, rest = m.group("kind"), m.group("rest")
+            if kind == "БЫЛО":
+                require_after(n, f"строка {n}: новое «БЫЛО:»")
+                flush()
+                if not rest.strip():
+                    raise EditsFormatError(src, n, "«БЫЛО:» пустое — нужна точная цитата из черновика")
+                before_lines, before_line, state = [rest], n, "before"
+            elif kind == "СТАЛО":
+                if state not in ("before", "before_done"):
+                    raise EditsFormatError(src, n, "«СТАЛО:» без предшествующего «БЫЛО:»")
+                value, state = [rest], "after"
+            else:  # УКАЗАНИЕ
+                require_after(n, f"строка {n}: «УКАЗАНИЕ:»")
+                flush()
+                value, state = [rest], "note"
+            continue
+        if not line.strip():
+            if state == "before":
+                state = "before_done"
+            elif state in ("after", "note"):
+                flush()
+            continue
+        if state == "before":
+            before_lines.append(line)
+        elif state in ("after", "note"):
+            value.append(line)
+        elif state == "before_done":
+            raise EditsFormatError(src, n, f"у «БЫЛО:» (строка {before_line}) нет своего «СТАЛО:»")
+        # idle: свободный текст (заголовки, пояснения) — не правка
+    if state in ("before", "before_done"):
+        raise EditsFormatError(src, before_line, "у «БЫЛО:» нет своего «СТАЛО:» до конца файла")
+    flush()
+    return edits
 
 
 def parse_edits_md(ws: Workspace, chapter: int) -> list[Edit]:
@@ -111,17 +200,7 @@ def parse_edits_md(ws: Workspace, chapter: int) -> list[Edit]:
     path = ws.chapter_dir(chapter) / "edits.md"
     if not path.exists():
         raise FileNotFoundError(f"Нет файла правок {path}. Сначала `ugar review {chapter}`.")
-    text = path.read_text(encoding="utf-8")
-    # примеры формата в ограждённых код-блоках — не правки
-    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
-    edits: list[Edit] = []
-    seq = 1
-    for m in _PAIR_RE.finditer(text):
-        edits.append(Edit(chapter=chapter, seq=seq, before=m.group("before").strip(), after=m.group("after").strip()))
-        seq += 1
-    for m in _FREE_RE.finditer(text):
-        edits.append(Edit(chapter=chapter, seq=seq, before="", after=m.group(1).strip(), note="свободное указание"))
-        seq += 1
+    edits = parse_edits_text(path.read_text(encoding="utf-8"), chapter, path)
     save_edits(ws, chapter, edits)
     return edits
 

@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,11 +29,43 @@ def load_tests(ws: Workspace) -> list[GoldenTest]:
     return tests
 
 
+def safe_file_stem(test_id: str) -> str:
+    """test_id → безопасное имя файла: без разделителей путей и служебных символов (2.11)."""
+    stem = re.sub(r"[^\w.\-]+", "_", test_id.strip(), flags=re.UNICODE).strip("._")
+    if not stem:
+        raise ValueError(f"test_id «{test_id}» не годится для имени файла — используйте буквы, цифры, «_» и «-».")
+    return stem[:120]
+
+
 def add_test(ws: Workspace, test: GoldenTest) -> Path:
     """FR-R1: пополнение корпуса из ошибки, пропущенной эшелонами и пойманной автором."""
-    path = golden_dir(ws) / f"{test.test_id}.json"
+    path = golden_dir(ws) / f"{safe_file_stem(test.test_id)}.json"
     guard.write_text(path, json.dumps(test.model_dump(), ensure_ascii=False, indent=2) + "\n")
     return path
+
+
+def environment_hashes(ws: Workspace) -> dict[str, str]:
+    """Отпечаток конфигурации, к которой относится отчёт регрессии (2.8):
+    config.yaml, папка шаблонов, exports/norms.json. Изменилось — отчёт устарел."""
+
+    def sha(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def file_hash(path: Path) -> str:
+        return sha(path.read_bytes()) if path.exists() else ""
+
+    h = hashlib.sha256()
+    if ws.templates.exists():
+        for f in sorted(p for p in ws.templates.rglob("*") if p.is_file()):
+            h.update(f.relative_to(ws.templates).as_posix().encode("utf-8"))
+            h.update(b"\0")
+            h.update(f.read_bytes())
+            h.update(b"\0")
+    return {
+        "config.yaml": file_hash(ws.root / "config.yaml"),
+        "templates": h.hexdigest(),
+        "norms.json": file_hash(ws.exports / "norms.json"),
+    }
 
 
 def _brief_from_context(ctx: dict) -> Brief:
@@ -111,12 +145,27 @@ def run_regression(ws: Workspace, llm: bool = False, cfg: Config | None = None) 
             {"test_id": test.test_id, "поймано": caught, "пропущено": missed, "лишние": extra}
         )
     missed_total = [r["test_id"] for r in results if r.get("пропущено")]
+    executed = [r["test_id"] for r in results if not r.get("skipped")]
+    # «зелёная» — только когда что-то действительно проверено (2.8): пустой корпус или
+    # сплошь пропущенные Э2-тесты доказательством ничего не являются (FR-R3)
+    green = bool(executed) and not missed_total
+    if not tests:
+        reason = "корпус пуст"
+    elif not executed:
+        reason = "все тесты пропущены (Э2 без --llm/API)"
+    elif missed_total:
+        reason = "пропущены ожидаемые флаги"
+    else:
+        reason = ""
     report = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "всего": len(tests),
-        "зелёная": not missed_total,
+        "выполнено": len(executed),
+        "зелёная": green,
+        "причина": reason,
         "провалено": missed_total,
         "результаты": results,
+        "хэши": environment_hashes(ws),
     }
     guard.write_text(
         ws.regression / "report.json", json.dumps(report, ensure_ascii=False, indent=2) + "\n"
@@ -124,9 +173,23 @@ def run_regression(ws: Workspace, llm: bool = False, cfg: Config | None = None) 
     return report
 
 
-def is_green(ws: Workspace) -> bool | None:
-    """None — регрессия ещё не запускалась."""
+def load_report(ws: Workspace) -> dict | None:
     path = ws.regression / "report.json"
     if not path.exists():
         return None
-    return bool(json.loads(path.read_text(encoding="utf-8")).get("зелёная"))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def is_stale(ws: Workspace) -> bool:
+    """Отчёт есть, но конфигурация (config/шаблоны/нормы) с тех пор изменилась."""
+    report = load_report(ws)
+    return report is not None and report.get("хэши") != environment_hashes(ws)
+
+
+def is_green(ws: Workspace) -> bool | None:
+    """None — регрессия ещё не запускалась ИЛИ отчёт устарел (изменились config.yaml,
+    шаблоны или нормы — FR-R3 требует нового прогона)."""
+    report = load_report(ws)
+    if report is None or report.get("хэши") != environment_hashes(ws):
+        return None
+    return bool(report.get("зелёная"))
