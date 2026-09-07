@@ -27,7 +27,7 @@ from pathlib import Path
 
 import typer
 
-from . import exporter, review, timing, verifier2
+from . import exporter, guard, review, timing, verifier2
 from .config import Config
 from .fsm import ChapterState, all_states
 from .paths import Workspace
@@ -37,6 +37,7 @@ COMMANDS = {
     "run", "export", "compile", "write", "verify1", "verify2", "review",
     "apply-edits", "diff-check", "diff-check-author", "regress", "canonize", "canonize-apply",
     "story-circles", "circles-canon",
+    "lint", "lint-llm", "canon-commit",
 }
 
 # допустимые уровни кругов истории (Р-020) и виды промптов ручного режима
@@ -188,6 +189,14 @@ class PanelAPI:
         self.cfg = cfg
         self.library = library
         self.jobs = JobRunner()
+        # линтер канона в реальном времени: наблюдатель за библиотекой → перепроверка (ugar/lint.py)
+        from . import canonwatch, lint as lint_mod
+
+        self.lint_report = lint_mod.load_report(self.ws.logs)
+        self.lint_changed: list[str] = []
+        self.lint_pending = False
+        self.lint_running = False
+        self.watcher = canonwatch.CanonWatcher(self.library, self._on_canon_change)
 
     # ------------------------------------------------------------- чтение
 
@@ -225,6 +234,7 @@ class PanelAPI:
             "regression_green": regression.is_green(self.ws),
             "models": {"writer": self.cfg.writer.model, "verifier2": self.cfg.verifier2.model},
             "job": self.jobs.summary(),
+            "lint": self.lint_summary(),
         }
 
     def chapter(self, n: int) -> dict:
@@ -460,6 +470,98 @@ class PanelAPI:
             path = circles_mod.accept_manual(self.ws, scope, key, text)
         return {"ok": True, "path": str(path)}
 
+    # ------------------------------------------------------- канон и линтер
+
+    def _on_canon_change(self, changed: list[str]) -> None:
+        self.lint_changed = changed
+        self.lint_pending = True
+        self.run_lint_now()
+
+    def run_lint_now(self) -> None:
+        """Перепроверка канона, если сервер свободен; иначе — при следующем опросе состояния."""
+        from . import lint as lint_mod
+
+        try:
+            with self.jobs.exclusive():
+                self.lint_running = True
+                try:
+                    self.lint_report = lint_mod.run_lint(self.library, self.ws.exports, self.ws.logs)
+                    self.lint_pending = False
+                finally:
+                    self.lint_running = False
+        except RuntimeError:
+            self.lint_pending = True  # занято задачей — повторим позже
+
+    def lint(self) -> dict:
+        if self.lint_pending and not self.jobs.busy and not self.lint_running:
+            self.run_lint_now()
+        from . import lint as lint_mod
+
+        fresh = lint_mod.load_report(self.ws.logs)
+        if fresh and (not self.lint_report or fresh.ts != self.lint_report.ts):
+            self.lint_report = fresh  # отчёт обновила задача `lint`/`lint-llm` или CLI
+        return {
+            "report": self.lint_report.model_dump() if self.lint_report else None,
+            "changed": self.lint_changed,
+            "running": self.lint_running,
+            "pending": self.lint_pending,
+        }
+
+    def lint_summary(self) -> dict | None:
+        r = self.lint_report
+        return {"errors": r.errors, "warnings": r.warnings, "notes": r.notes, "ts": r.ts} if r else None
+
+    def _canon_path(self, rel: str) -> Path:
+        if not rel or not rel.endswith(".md") or ".." in rel.split("/"):
+            raise ValueError("документ канона: относительный путь к .md внутри библиотеки")
+        path = (self.library / rel).resolve()
+        if self.library.resolve() not in path.parents:
+            raise ValueError("путь вне библиотеки")
+        return path
+
+    def canon_docs(self) -> dict:
+        docs = []
+        for p in sorted(self.library.rglob("*.md")):
+            st = p.stat()
+            docs.append({"path": str(p.relative_to(self.library)).replace("\\", "/"), "name": p.name,
+                         "mtime": st.st_mtime_ns, "size": st.st_size})
+        return {"docs": docs}
+
+    def canon_doc(self, rel: str) -> dict:
+        path = self._canon_path(rel)
+        if not path.exists():
+            raise FileNotFoundError(f"нет документа {rel}")
+        return {"path": rel, "text": path.read_text(encoding="utf-8"), "mtime": path.stat().st_mtime_ns}
+
+    def save_canon_doc(self, rel: str, text: str, mtime: int | None) -> dict:
+        """Правка канона автором из панели (сценарий Б): подтверждение дано диалогом, запись — в сессии канониста."""
+        path = self._canon_path(rel)
+        if mtime is not None and path.exists() and path.stat().st_mtime_ns != mtime:
+            raise RuntimeError("документ изменён на диске после открытия — перечитайте его, чтобы не затереть чужую правку")
+        with self.jobs.exclusive():
+            with guard.canon_write_session():
+                guard.write_text(path, text if text.endswith("\n") else text + "\n")
+        self.watcher._snapshot = self.watcher._scan()  # своя запись — не «внешнее» изменение
+        self.lint_changed = [rel]
+        self.run_lint_now()
+        return {"saved": rel, "mtime": path.stat().st_mtime_ns, "lint": self.lint_summary()}
+
+    def apply_lint_fix(self, index: int) -> dict:
+        from . import lint as lint_mod
+
+        if not self.lint_report or not (0 <= index < len(self.lint_report.findings)):
+            raise ValueError("нет такой находки — перепроверьте канон")
+        fix = self.lint_report.findings[index].fix
+        if fix is None:
+            raise ValueError("у этой находки нет механического исправления — правьте документ")
+        with self.jobs.exclusive():
+            with guard.canon_write_session():
+                lint_mod.apply_fix(self.library, fix)
+        self.watcher._snapshot = self.watcher._scan()
+        self.lint_changed = [fix.file]
+        self.run_lint_now()
+        return {"applied": fix.model_dump(), "lint": self.lint_summary()}
+
     def run_command(self, cmd: str, chapter: int | None, params: dict | None = None) -> dict:
         """Долгие шаги такта — фоновой задачей с захватом вывода."""
         if cmd not in COMMANDS:
@@ -491,6 +593,10 @@ class PanelAPI:
             "canonize": lambda: cli.cmd_canonize(chapter, apply=False, yes=True),
             # подтверждение автор дал кнопкой + диалогом в панели (Д-8)
             "canonize-apply": lambda: cli.cmd_canonize(chapter, apply=True, yes=True),
+            "lint": lambda: cli.cmd_lint(llm=False, files=[], watch=False),
+            "lint-llm": lambda: cli.cmd_lint(llm=True, files=list(params.get("files") or []), watch=False),
+            # подтверждение автор дал диалогом в панели (Д-8); сообщение — из поля панели
+            "canon-commit": lambda: cli.cmd_canon_commit(message=str(params.get("message") or "правка канона из панели"), yes=True),
         }
         self.jobs.start(cmd, chapter, fns[cmd])
         return self.jobs.summary()  # type: ignore[return-value]
@@ -596,6 +702,15 @@ def make_handler(api: PanelAPI):
                 m = re.fullmatch(r"/api/circles/prompt/([\w\-]+)", path)
                 if m:
                     return self._json(api.circle_prompt(m.group(1)))
+                if path == "/api/lint":
+                    return self._json(api.lint())
+                if path == "/api/canon":
+                    return self._json(api.canon_docs())
+                if path == "/api/canon/doc":
+                    from urllib.parse import parse_qs, urlparse
+
+                    rel = parse_qs(urlparse(self.path).query).get("path", [""])[0]
+                    return self._json(api.canon_doc(rel))
                 if path == "/api/log":
                     return self._json(api.api_log())
                 if path == "/api/job":
@@ -654,6 +769,15 @@ def make_handler(api: PanelAPI):
                 m = re.fullmatch(r"/api/chapter/(\d+)/prompt/(\w+)", path)
                 if m:
                     return self._json(api.save_prompt(int(m.group(1)), m.group(2)))
+                if path == "/api/canon/doc":
+                    mt = body.get("mtime")
+                    return self._json(api.save_canon_doc(str(body.get("path", "")), str(body.get("text", "")),
+                                                         int(mt) if isinstance(mt, int) else None))
+                if path == "/api/lint/fix":
+                    idx = body.get("index")
+                    if not isinstance(idx, int) or isinstance(idx, bool):
+                        raise ValueError("index: целое число")
+                    return self._json(api.apply_lint_fix(idx))
                 if path == "/api/circles/manual":
                     return self._json(api.manual_circle(body.get("scope", ""), body.get("key"), str(body.get("text", ""))))
                 m = re.fullmatch(r"/api/chapter/(\d+)/manual-draft", path)
@@ -680,8 +804,11 @@ def make_handler(api: PanelAPI):
     return Handler
 
 
-def serve(ws: Workspace, cfg: Config, library: Path, port: int = 8765) -> ThreadingHTTPServer:
+def serve(ws: Workspace, cfg: Config, library: Path, port: int = 8765, watch: bool = True) -> ThreadingHTTPServer:
     """Создаёт сервер на 127.0.0.1 (не запускает цикл — это делает вызывающий)."""
     api = PanelAPI(ws, cfg, library)
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(api))
+    server.api = api  # type: ignore[attr-defined]
+    if watch:
+        api.watcher.start()  # линтер канона в реальном времени
     return server

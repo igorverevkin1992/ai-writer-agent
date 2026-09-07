@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { apiGet, apiPost } from "./api";
 import { ChapterView } from "./ChapterView";
+import { Canon } from "./Canon";
 import { Circles } from "./Circles";
 import { useConfirm } from "./Confirm";
 import { usePending } from "./hooks";
@@ -11,6 +12,7 @@ type View =
   | { kind: "дашборд" }
   | { kind: "журнал" }
   | { kind: "круги" }
+  | { kind: "канон" }
   | { kind: "поиск"; q: string };
 
 export type Notify = (text: string, kind?: "ok" | "err") => void;
@@ -102,6 +104,9 @@ export default function App() {
           <br />
           Регрессия:{" "}
           {state.regression_green === null ? "не запускалась" : state.regression_green ? "зелёная ✓" : "КРАСНАЯ ✗"}
+          <br />
+          Канон:{" "}
+          {state.lint === null ? "не проверялся" : state.lint.errors ? `ошибок ${state.lint.errors} ✗` : state.lint.warnings ? `предупреждений ${state.lint.warnings}` : "противоречий нет ✓"}
         </div>
         <div className="sidebtns">
           <button disabled={busy} onClick={() => run(() => runCommand("export"))}>Экспорт канона</button>
@@ -114,6 +119,9 @@ export default function App() {
           </button>
           <button className={view?.kind === "круги" ? "primary" : ""} onClick={() => setView({ kind: "круги" })}>
             Круги истории
+          </button>
+          <button className={view?.kind === "канон" ? "primary" : ""} onClick={() => setView({ kind: "канон" })}>
+            Канон{state.lint?.errors ? ` (${state.lint.errors})` : ""}
           </button>
         </div>
 
@@ -176,6 +184,9 @@ export default function App() {
             refreshTick={refreshTick}
             chapterCount={state.briefs.length}
           />
+        )}
+        {view?.kind === "канон" && (
+          <Canon busy={running} runCommand={runCommand} notify={notify} confirm={confirm} refreshTick={refreshTick} />
         )}
         {view?.kind === "поиск" && <SearchView q={view.q} notify={notify} />}
         {view?.kind === "глава" && (

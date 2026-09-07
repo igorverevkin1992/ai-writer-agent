@@ -1,0 +1,239 @@
+"""Линтер канона: проверки противоречий (демо и реальная библиотека), исправления, наблюдатель, API панели, CLI."""
+
+import json
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from ugar import canonwatch, exporter, guard, lint, server
+from ugar.cli import app
+from ugar.config import Config
+from ugar.paths import Workspace
+from ugar.schemas import LintFinding, LintFix
+
+REPO = Path(__file__).resolve().parent.parent
+LIBRARY = REPO / "УГАР_Библиотека"
+real_only = pytest.mark.skipif(not LIBRARY.exists(), reason="реальная библиотека не подключена")
+
+
+@pytest.fixture(autouse=True)
+def _offline(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+
+def _edit(path: Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert old in text, old
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+# ------------------------------------------------------------- машинный слой
+
+
+def test_демо_библиотека_без_противоречий(ws, library):
+    report = lint.run_lint(library, ws.exports, ws.logs)
+    assert report.errors == 0 and report.warnings == 0, [f.message for f in report.findings]
+    assert (ws.logs / "lint.json").exists() and (ws.logs / "lint.md").exists()
+
+
+def test_хронология_глав(ws, library):
+    _edit(library / "23_Поглавник_Том1.md", "- Дата: 12 июня 1995", "- Дата: 12 июля 1995")  # гл. 1 позже гл. 5
+    report = lint.run_lint(library, ws.exports, ws.logs)
+    codes = {f.code for f in report.findings}
+    assert "ХРОН-2" in codes and report.errors >= 1
+    f = next(f for f in report.findings if f.code == "ХРОН-2")
+    assert "23_Поглавник_Том1.md" in f.file and "хронологию" in f.message
+
+
+def test_ссылки_на_главы_вне_тома(ws, library):
+    _edit(library / "31_Матрица_знаний.md", "| M-002 | у Зои есть ключ от гаража №14 | Каширин | 4 |",
+          "| M-002 | у Зои есть ключ от гаража №14 | Каширин | 40 |")
+    _edit(library / "32_Реестр_закладок.md", "| P-001 | записка без подписи на столе | т1 гл1 | т1 гл9 |",
+          "| P-001 | записка без подписи на столе | т1 гл9 | т1 гл1 |")
+    report = lint.run_lint(library, ws.exports, ws.logs)
+    codes = [f.code for f in report.findings]
+    assert "МАТР-1" in codes and "ЗАКЛ-2" in codes
+    m = next(f for f in report.findings if f.code == "МАТР-1")
+    assert m.line and "31_Матрица_знаний.md" in m.file
+
+
+def test_ошибка_разметки_как_находка(ws, library):
+    p = library / "31_Матрица_знаний.md"
+    p.write_text(p.read_text(encoding="utf-8").replace("| M-001 | записка", "| M-001 записка", 1), encoding="utf-8")
+    report = lint.run_lint(library, ws.exports, ws.logs)
+    assert report.errors == 1 and report.findings[0].code == "РАЗМ-1"
+    assert report.findings[0].file.endswith("31_Матрица_знаний.md") and report.findings[0].line
+
+
+def test_исправление_применяется_только_в_сессии_канона(ws, library):
+    p = library / "Досье" / "Персонаж_Зоя.md"
+    line = next(i for i, l in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if "24 года" in l)
+    fix = LintFix(file="Досье/Персонаж_Зоя.md", line=line, old="24 года", new="25 лет")
+    with pytest.raises(guard.CanonWriteError):
+        lint.apply_fix(library, fix)
+    with guard.canon_write_session():
+        lint.apply_fix(library, fix)
+    assert "25 лет" in p.read_text(encoding="utf-8")
+    with guard.canon_write_session(), pytest.raises(ValueError, match="изменилась"):
+        lint.apply_fix(library, fix)  # строка уже другая — исправление устарело
+    with pytest.raises(ValueError, match="вне библиотеки"), guard.canon_write_session():
+        lint.apply_fix(library, LintFix(file="../config.yaml", line=1, old="x", new="y"))
+
+
+def test_модельный_слой_разбирает_ответ(ws, library):
+    doc = library / "23_Поглавник_Том1.md"
+    raw = 'Нашёл:\n[{"quote": "Зоя впервые упоминает гаражи", "problem": "гаражи уже названы в гл. 1", "suggestion": "убрать «впервые»", "severity": "ошибка"}]'
+    found = lint.parse_llm_findings(raw, library, doc)
+    assert len(found) == 1 and found[0].source == "модель" and found[0].line and found[0].severity == "ошибка"
+    base = lint.run_lint(library, ws.exports, ws.logs)
+    merged = lint.merge_llm(base, found, ws.logs)
+    assert merged.errors == 1 and any(f.source == "модель" for f in merged.findings)
+
+
+def test_модельный_слой_без_api_сохраняет_промпты(ws, library):
+    findings, prompts = lint.run_lint_llm(ws, Config(), library, [library / "23_Поглавник_Том1.md"])
+    assert not findings and len(prompts) == 1 and Path(prompts[0]).exists()
+
+
+@real_only
+def test_реальная_библиотека_без_ошибок():
+    """Реальный канон: ошибок уровня «ошибка» нет; предупреждения — подсветка для автора, а не шум."""
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp())
+    ws = Workspace(tmp)
+    guard.set_library_dir(LIBRARY)
+    report = lint.run_lint(LIBRARY, ws.exports, ws.logs)
+    assert report.errors == 0, [f.message for f in report.findings if f.severity == "ошибка"]
+    codes = {f.code for f in report.findings}
+    # известное расхождение реестра и матрицы по Т-07 подсвечено — это работа линтера, не шум
+    assert "ТАЙНА-1" in codes
+    # возраст «гл. 41 т.1» больше не принимается за возраст (ложных ДОСЬЕ-1 нет)
+    assert not any(f.code == "ДОСЬЕ-1" and "41" in f.message for f in report.findings)
+
+
+# ------------------------------------------------------------- наблюдатель
+
+
+def test_наблюдатель_замечает_изменение(library):
+    seen: list[list[str]] = []
+    w = canonwatch.CanonWatcher(library, seen.append, interval=0.01)
+    assert w.poll() == []
+    (library / "36_Журнал_решений.md").write_text("# новый\n", encoding="utf-8")
+    assert w.poll() == []            # изменение замечено, ждём «устоявшегося» mtime
+    assert w.poll() == ["36_Журнал_решений.md"]
+    assert w.poll() == []
+
+
+# ------------------------------------------------------------- панель
+
+
+@pytest.fixture
+def panel(ws, library, monkeypatch):
+    monkeypatch.chdir(ws.root)
+    srv = server.serve(ws, Config(), library, port=0, watch=False)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{port}", srv.api  # type: ignore[attr-defined]
+    srv.shutdown()
+    srv.server_close()
+
+
+def _get(url: str):
+    with urllib.request.urlopen(url, timeout=5) as r:
+        return r.status, json.loads(r.read().decode())
+
+
+def _post(url: str, body: dict):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Ugar-Panel": "1"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode() or "{}")
+
+
+def test_панель_канон_чтение_правка_и_линт(panel, ws, library):
+    base, api = panel
+    status, docs = _get(f"{base}/api/canon")
+    assert status == 200 and any(d["path"] == "23_Поглавник_Том1.md" for d in docs["docs"])
+    status, doc = _get(f"{base}/api/canon/doc?path=" + urllib.parse.quote("23_Поглавник_Том1.md"))
+    assert status == 200 and "Глава 1" in doc["text"]
+    # вне библиотеки — отказ
+    try:
+        urllib.request.urlopen(f"{base}/api/canon/doc?path=../config.yaml", timeout=5)
+        raise AssertionError("ожидался отказ")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+    # правка с противоречием → сохранение проходит (файл автора), линт подсвечивает ошибку
+    text = doc["text"].replace("- Дата: 12 июня 1995", "- Дата: 12 июля 1995")
+    status, r = _post(f"{base}/api/canon/doc", {"path": "23_Поглавник_Том1.md", "text": text, "mtime": doc["mtime"]})
+    assert status == 200, r
+    assert "12 июля" in (library / "23_Поглавник_Том1.md").read_text(encoding="utf-8")
+    assert r["lint"]["errors"] >= 1
+    status, l = _get(f"{base}/api/lint")
+    assert status == 200 and any(f["code"] == "ХРОН-2" for f in l["report"]["findings"])
+    # устаревший mtime — конфликт
+    status, r = _post(f"{base}/api/canon/doc", {"path": "23_Поглавник_Том1.md", "text": text, "mtime": doc["mtime"]})
+    assert status == 400 and "изменён на диске" in r["error"]
+    # сводка в состоянии панели
+    status, st = _get(f"{base}/api/state")
+    assert st["lint"]["errors"] >= 1
+
+
+def test_панель_применяет_исправление(panel, ws, library):
+    base, api = panel
+    p = library / "Досье" / "Персонаж_Зоя.md"
+    line = next(i for i, l in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if "24 года" in l)
+    api.run_lint_now()
+    api.lint_report.findings.append(LintFinding(
+        code="ТЕСТ", severity="заметка", file="Досье/Персонаж_Зоя.md", line=line, message="возраст",
+        fix=LintFix(file="Досье/Персонаж_Зоя.md", line=line, old="24 года", new="25 лет", note="тест"),
+    ))
+    idx = len(api.lint_report.findings) - 1
+    status, r = _post(f"{base}/api/lint/fix", {"index": idx})
+    assert status == 200, r
+    assert "25 лет" in p.read_text(encoding="utf-8")
+    status, r = _post(f"{base}/api/lint/fix", {"index": 999})
+    assert status == 400
+
+
+def test_панель_наблюдатель_перепроверяет_после_правки_на_диске(ws, library, monkeypatch):
+    monkeypatch.chdir(ws.root)
+    srv = server.serve(ws, Config(), library, port=0, watch=False)
+    api = srv.api  # type: ignore[attr-defined]
+    api.watcher.interval = 0.02
+    api.watcher.start()
+    try:
+        _edit(library / "23_Поглавник_Том1.md", "- Дата: 12 июня 1995", "- Дата: 12 июля 1995")
+        deadline = time.time() + 5
+        while time.time() < deadline and not (api.lint_report and api.lint_report.errors):
+            time.sleep(0.05)
+        assert api.lint_report and api.lint_report.errors >= 1
+        assert api.lint_changed == ["23_Поглавник_Том1.md"]
+    finally:
+        api.watcher.stop()
+        srv.server_close()
+
+
+# ------------------------------------------------------------- CLI
+
+
+def test_cli_lint(ws, library, monkeypatch):
+    monkeypatch.chdir(ws.root)
+    runner = CliRunner()
+    r = runner.invoke(app, ["lint"])
+    assert r.exit_code == 0 and "ошибок 0" in r.output
+    _edit(library / "23_Поглавник_Том1.md", "- Дата: 12 июня 1995", "- Дата: 12 июля 1995")
+    r = runner.invoke(app, ["lint"])
+    assert r.exit_code == 1 and "ХРОН-2" in r.output
+    assert (ws.logs / "lint.md").read_text(encoding="utf-8").count("ошибка") >= 1

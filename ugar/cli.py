@@ -792,6 +792,53 @@ def cmd_circles(
         typer.echo("Все круги уже есть — `--заново` для пересчёта.")
 
 
+@app.command("lint", rich_help_panel="Канон и бэкап")
+@_friendly
+def cmd_lint(
+    llm: bool = typer.Option(False, "--llm", help="Дополнительно: смысловые противоречия моделью (по вызову на документ)."),
+    files: list[str] = typer.Option([], "--файл", "--file", help="Только эти документы для модельного слоя (путь внутри библиотеки)."),
+    watch: bool = typer.Option(False, "--watch", "--следить", help="Следить за библиотекой и перепроверять при каждом изменении."),
+) -> None:
+    """Проверка канона на противоречия и ошибки логики повествования (машинный слой; --llm — модель)."""
+    from . import lint as lint_mod
+
+    ws, cfg, lib = _ctx()
+    if not isinstance(files, list):
+        files = []
+
+    def once() -> int:
+        report = lint_mod.run_lint(lib, ws.exports, ws.logs)
+        if llm and report.errors == 0:
+            extra, prompts = lint_mod.run_lint_llm(ws, cfg, lib, [lib / f for f in files] or None)
+            report = lint_mod.merge_llm(report, extra, ws.logs)
+            if prompts:
+                typer.secho(f"⚠ API недоступен: промпты модельного слоя сохранены ({len(prompts)}) в logs/линтер_промпты/", fg=typer.colors.YELLOW)
+        for f in report.findings:
+            color = {"ошибка": typer.colors.RED, "предупреждение": typer.colors.YELLOW, "заметка": typer.colors.BLUE}[f.severity]
+            where = f"{f.file}:{f.line}" if f.line else f.file
+            typer.secho(f"  [{f.severity}] {f.code} {where} — {f.message}", fg=color)
+            if f.fix:
+                typer.echo(f"      исправление: «{f.fix.old}» → «{f.fix.new}»")
+        typer.secho(
+            f"Канон: документов {report.files_checked}, ошибок {report.errors}, предупреждений {report.warnings}, "
+            f"заметок {report.notes} → logs/lint.md",
+            fg=typer.colors.RED if report.errors else typer.colors.GREEN,
+        )
+        return report.errors
+
+    if not watch:
+        raise typer.Exit(code=1 if once() else 0)
+    from . import canonwatch
+
+    once()
+    typer.echo("Слежу за библиотекой (Ctrl+C — стоп)…")
+    watcher = canonwatch.CanonWatcher(lib, lambda changed: (typer.echo(f"\nИзменено: {', '.join(changed)}"), once()))
+    try:
+        watcher.run_forever()
+    except KeyboardInterrupt:
+        typer.echo("Остановлено.")
+
+
 @app.command("snapshot", rich_help_panel="Канон и бэкап")
 @_friendly
 def cmd_snapshot(volume: int = typer.Argument(1, help="Номер тома.")) -> None:
@@ -1127,6 +1174,15 @@ def cmd_canon_commit(
     if not gitops.dirty(lib):
         typer.echo("В библиотеке нет изменений — коммитить нечего.")
         return
+    from . import lint as lint_mod
+
+    report = lint_mod.run_lint(lib, ws.exports, ws.logs)
+    if report.errors or report.warnings:
+        typer.secho(
+            f"⚠ Проверка канона: ошибок {report.errors}, предупреждений {report.warnings} (logs/lint.md) — "
+            "коммит не блокируется, решение за автором.",
+            fg=typer.colors.YELLOW,
+        )
     if not yes and not typer.confirm(f"Закоммитить изменения библиотеки: «{message}»? (Д-8) (y)"):
         raise typer.Exit()
     commit = gitops.commit_all(lib, message, author=cfg.commit_author)

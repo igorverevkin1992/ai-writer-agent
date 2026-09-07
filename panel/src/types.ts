@@ -29,6 +29,30 @@ export interface Job {
   output?: string; // полный лог — только /api/job
 }
 
+export interface LintFix { file: string; line: number; old: string; new: string; note: string }
+
+export interface LintFinding {
+  code: string;
+  severity: "ошибка" | "предупреждение" | "заметка";
+  file: string;
+  line: number | null;
+  message: string;
+  quote: string;
+  fix: LintFix | null;
+  source: "машина" | "модель";
+}
+
+export interface LintReport {
+  ts: string;
+  files_checked: number;
+  findings: LintFinding[];
+  errors: number;
+  warnings: number;
+  notes: number;
+}
+
+export interface LintSummary { errors: number; warnings: number; notes: number; ts: string }
+
 export interface AppState {
   workspace: string;
   chapters: QueueChapter[];
@@ -36,6 +60,7 @@ export interface AppState {
   regression_green: boolean | null;
   models: { writer: string; verifier2: string };
   job: Job | null;
+  lint: LintSummary | null;
 }
 
 export interface Check {

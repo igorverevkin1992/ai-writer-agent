@@ -245,3 +245,40 @@ class GoldenTest(BaseModel):
     context_slice: dict = Field(default_factory=dict)  # chapter, focal, year, window?
     expected_flags: list[str] = Field(default_factory=list)  # check_id / type
     echelon: Literal["Э1", "Э2"] = "Э1"
+
+
+# ------------------------------------------------------------- линтер канона
+
+
+class LintFix(BaseModel):
+    """Механическое исправление: в файле file на строке line заменить old → new (применяет автор)."""
+
+    file: str
+    line: int
+    old: str
+    new: str
+    note: str = ""
+
+
+class LintFinding(BaseModel):
+    code: str
+    severity: Literal["ошибка", "предупреждение", "заметка"]
+    file: str
+    line: int | None = None
+    message: str
+    quote: str = ""
+    fix: LintFix | None = None
+    source: Literal["машина", "модель"] = "машина"
+
+
+class LintReport(BaseModel):
+    ts: str
+    files_checked: int = 0
+    findings: list[LintFinding] = Field(default_factory=list)
+    errors: int = 0
+    warnings: int = 0
+    notes: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.errors == 0

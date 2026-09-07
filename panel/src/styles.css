@@ -106,3 +106,10 @@ pre.window { border: 1px solid var(--line); border-radius: 8px; padding: 10px; f
 
 ol.circle { padding-left: 22px; margin: 8px 0 0; }
 ol.circle li { margin: 6px 0; }
+
+/* вид «Канон»: список документов + редактор */
+.canon-layout { display: grid; grid-template-columns: 260px 1fr; gap: 14px; margin: 8px 0 16px; }
+.canon-docs { max-height: 60vh; overflow-y: auto; }
+.canon-docs .qitem { padding: 6px 8px; font-size: 12.5px; margin-bottom: 5px; }
+.canon-text { width: 100%; min-height: 60vh; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px;
+  line-height: 18px; white-space: pre; overflow: auto; margin-top: 8px; }
