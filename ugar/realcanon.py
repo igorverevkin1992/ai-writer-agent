@@ -489,21 +489,46 @@ def reveal_chapter(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# явная ссылка на факт матрицы в строке реестра: «М-12», «факт 12»
+_FACT_REF_RE = re.compile(r"\bМ-(\d+)\b|\bфакт[а-я]*\s+(\d+)\b", re.IGNORECASE)
+# слова, не считающиеся значимыми при сопоставлении тайны с фактом матрицы
+_MATCH_STOP = {
+    "года", "году", "год", "полная", "картина", "слой", "кто", "что", "как", "его", "при", "для", "все", "или",
+    "это", "том", "томе", "тома", "нет", "без", "над", "под", "про", "где", "уже", "ответ", "никто",
+}
+
+
+def _match_words(text: str) -> set[str]:
+    """Значимые основы: слова ≥3 букв (первые 5 букв — «подлог»/«подложный», «рапорт»/«рапорте») и годы."""
+    stems = {w[:5] for w in re.findall(r"[а-яё]{3,}", text.lower()) if w not in _MATCH_STOP}
+    return stems | set(re.findall(r"\b\d{4}\b", text))
+
+
 def _match_matrix_fact(secret: str, matrix: list[MatrixFact]) -> str | None:
-    """fact_id факта матрицы 3.1 с наибольшим совпадением слов с текстом тайны."""
-    def words(t: str) -> set[str]:
-        return {w for w in re.findall(r"[а-яё]{4,}", t.lower()) if w not in {"года", "полная", "картина", "слой"}}
-    target = words(secret)
-    best, score = None, 0
-    for f in matrix:
-        if f.subject != "Читатель":
-            continue
-        n = len(target & words(f.fact))
-        if n > score:
-            best, score = f, n
-    if best is None or score < min(2, len(target)):
+    """fact_id факта матрицы 3.1 для строки реестра тайн (аудит 1.4).
+
+    Явная ссылка «М-12»/«факт 12» в тексте тайны решает всё. Иначе — факт с наибольшим числом общих
+    значимых основ, не меньше 3 (или всех основ тайны, если их меньше); при равенстве лучших — None."""
+    ref = _FACT_REF_RE.search(secret)
+    if ref:
+        num = int(ref.group(1) or ref.group(2))
+        return next((f.fact_id for f in matrix if f.fact_id == f"М-{num:02d}"), None)
+    target = _match_words(secret)
+    if not target:
         return None
-    return best.fact_id
+    scores: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for f in matrix:
+        if f.subject != "Читатель" or f.fact_id in seen:
+            continue
+        seen.add(f.fact_id)
+        scores.append((len(target & _match_words(f.fact)), f.fact_id))
+    scores.sort(key=lambda x: -x[0])
+    if not scores or scores[0][0] < min(3, len(target)):
+        return None
+    if len(scores) > 1 and scores[1][0] == scores[0][0]:
+        return None  # неоднозначно — лучше без сопоставления, чем ложное знание
+    return scores[0][1]
 
 
 def _matrix_knowledge(fact_id: str, matrix: list[MatrixFact]) -> tuple[int | None, dict[str, int]]:
@@ -520,10 +545,11 @@ def _matrix_knowledge(fact_id: str, matrix: list[MatrixFact]) -> tuple[int | Non
     return reader, known
 
 
-def _parse_known_by(text: str, known_names: set[str]) -> dict[str, int]:
+def _parse_known_by(text: str, known_names: set[str]) -> dict[str, int | None]:
     """«Лемм, Штерн; больше никто», «Степан, куратор ОГПУ; Штерн — с гл. 7; Лемм — с гл. 17»,
-    «Лемм; Заварзин узнает в томе 3» → {имя: глава}. Без главы — 0 (знает всегда)."""
-    known: dict[str, int] = {}
+    «Лемм; Заварзин узнает в томе 3» → {имя: глава}. Имя без главы — None («неизвестно когда»,
+    аудит 1.5): главу даёт матрица 3.1, а без неё — 0 (знает всегда)."""
+    known: dict[str, int | None] = {}
     for chunk in re.split(r"[;,]", text):
         chunk = chunk.strip()
         if not chunk or re.search(r"\b(никто|не узнает|не узнаёт)\b", chunk, re.IGNORECASE):
@@ -534,14 +560,22 @@ def _parse_known_by(text: str, known_names: set[str]) -> dict[str, int]:
         if name not in known_names:
             continue
         chm = CH_RE.search(chunk)
-        known[name] = int(chm.group(1)) if chm else 0
+        known[name] = int(chm.group(1)) if chm else None
     return known
 
 
-def _merge_known(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
-    out = dict(a)
-    for name, ch in b.items():
-        out[name] = min(out[name], ch) if name in out else ch
+def _merge_known(registry: dict[str, int | None], matrix: dict[str, int]) -> dict[str, int]:
+    """Знание из реестра + матрицы: обе главы есть — ранняя; в реестре имя без главы (None) —
+    глава матрицы, а без матрицы — 0 (всегда)."""
+    out: dict[str, int] = {}
+    for name in [*registry, *(n for n in matrix if n not in registry)]:
+        reg, mat = registry.get(name), matrix.get(name)
+        if reg is None:
+            out[name] = mat if mat is not None else 0
+        elif mat is None:
+            out[name] = reg
+        else:
+            out[name] = min(reg, mat)
     return out
 
 

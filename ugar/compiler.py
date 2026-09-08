@@ -97,30 +97,58 @@ def ban_active(b, brief: Brief) -> bool:
     return b.until_volume is None or brief.volume <= b.until_volume
 
 
-_FUTURE_RE = re.compile(r"(?:\bт\.\s*(\d+)|\bтом[аеу]?\s+(\d+)|\bт\.(\d+)[–-]\d+|Ф-19\d\d|Р-\d{3}|\bцикл)", re.IGNORECASE)
-_SENT_SPLIT_RE = re.compile(r"(?<=[.;!?])\s+|\n+")
+# ссылка на том где угодно во фразе: «т.6», «т.3–4», «тома 2–3», «в томе 3», «(т.1)», «цикл II», Ф-19xx, Р-№
+_FUTURE_RE = re.compile(
+    r"(?:\bт\.\s*(\d+)|\bтом(?:а|е|у|ах|ов|ы)?\s+(\d+)|Ф-19\d\d|Р-\d{3}|\bцикл)", re.IGNORECASE
+)
+# траектория «от … к …» при любой ссылке на том — путь через тома; стрелка «→» в досье — нотация арки (всегда)
+_TRAJECTORY_RE = re.compile(r"\bот\b.+?\bк\b", re.IGNORECASE)
+_ARC_RE = re.compile(r"→")
+# пометки инструменту/автору: «(⚠ решить при арке т.7)», «(держать в каждой сцене; инструмент обязан …)», «(🔧)»
+_TOOL_NOTE_RE = re.compile(
+    r"\s*\((?:[^()]*(?:⚠|🔧|инструмент|при арке|держать|проверять|финализировать|спроектировать|сформулировать)[^()]*)\)",
+    re.IGNORECASE,
+)
+_TOOL_MARK_RE = re.compile(r"[⚠🔧]")
+# граница фразы — точка/восклицание/вопрос + пробел (не после «гл.», «т.», «сц.», «ср.», «Рожд.») или перенос строки
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])(?<!\bгл\.)(?<!\bт\.)(?<!\bсц\.)(?<!\bср\.)(?<!\bРожд\.)(?<!\bрожд\.)\s+|\n+")
+
+
+def _phrase_safe(phrase: str, low_markers: list[str], volume: int) -> bool:
+    """Элемент фразы без маркеров незнакомых фокалу тайн, без ссылок на будущие тома (все ссылки
+    проверяются), без арки «A → B» и без траектории «от … к …» через тома (Р-022)."""
+    low = phrase.lower()
+    if any(m in low for m in low_markers):
+        return False
+    refs = list(_FUTURE_RE.finditer(phrase))
+    for m in refs:
+        num = next((g for g in m.groups() if g), None)
+        if num is None or int(num) > volume:
+            return False
+    if _ARC_RE.search(phrase):
+        return False
+    return not (refs and _TRAJECTORY_RE.search(phrase))
 
 
 def _safe_sentences(text: str, markers: list[str], volume: int) -> str:
-    """Оставляет только фразы без маркеров незнакомых фокалу тайн и без ссылок на будущие тома (Р-022)."""
+    """Оставляет только фразы без маркеров незнакомых фокалу тайн и без ссылок на будущие тома (Р-022).
+
+    Фраза = предложение до точки; элементы перечисления внутри неё разделены «;». Если хотя бы один
+    элемент вычищен, фраза убирается целиком — обрывков списков в окне не бывает. Скобочные пометки
+    инструменту («⚠ решить при арке», «инструмент обязан…», «🔧») вырезаются до проверки."""
     kept: list[str] = []
     low_markers = [m.lower() for m in markers if m]
     for sent in _SENT_SPLIT_RE.split(text):
-        sent = sent.strip()
+        sent = _TOOL_NOTE_RE.sub("", sent).strip()
         if not sent or sent.lower().startswith("возраст по томам"):
             continue
-        low = sent.lower()
-        if any(m in low for m in low_markers):
+        items = [it.strip() for it in sent.split(";")]
+        items = [it for it in items if it]
+        if not items or _TOOL_MARK_RE.search(sent):
             continue
-        future = False
-        for m in _FUTURE_RE.finditer(sent):
-            num = next((g for g in m.groups() if g), None)
-            if num is None or int(num) > volume:
-                future = True
-                break
-        if future:
-            continue
-        kept.append(sent)
+        if not all(_phrase_safe(it, low_markers, volume) for it in items):
+            continue  # список с вычищенным элементом убирается целиком
+        kept.append("; ".join(items))
     return " ".join(kept)
 
 
