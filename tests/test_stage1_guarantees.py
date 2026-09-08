@@ -21,6 +21,13 @@ LIBRARY = REPO / "УГАР_Библиотека"
 real_only = pytest.mark.skipif(not LIBRARY.exists(), reason="реальная библиотека не подключена")
 
 
+# пометки поглавника, адресованные читателю или инструменту (аудит 2, 1.10) — в окне их быть не должно
+READER_MARKERS = (
+    "читатель знает", "читатель узна", "читатель ещё не знает", "читателю-перечитывателю", "саспенс читателя",
+    "матрица №", "→ т.", "ЗАКЛАДКА →", "⚠", "🔧", "реш. при прозе", "эхо в гл", "улика слоя 1 №", "арка-парабола",
+)
+
+
 @pytest.fixture
 def real(tmp_path):
     (tmp_path / "config.yaml").write_text(f'library_dir: "{LIBRARY}"\n', encoding="utf-8")
@@ -95,6 +102,18 @@ def test_окна_всех_глав_без_тайн_фокала(real):
         for line in dossiers.splitlines():
             if line.rstrip().endswith(";") or ";;" in line:
                 leaks.append(f"гл. {b.chapter} ({b.focal}): обрывок списка «{line.strip()[:60]}»")
+        # аудит 2, 1.10: клаузы поглавника для читателя/инструмента — не Писателю (сцены, закладки сцен)
+        brief_text = "\n".join(sections.get(k, "") for k in ("бриф", "техзадание — закладки"))
+        brief_text = brief_text.replace("читатель узнаёт в гл.", "")  # формула запрета тайны — своя, не поглавника
+        for phrase in READER_MARKERS:
+            if phrase.lower() in brief_text.lower():
+                leaks.append(f"гл. {b.chapter} ({b.focal}): пометка читателю/инструменту «{phrase}»")
+        for ban in bans:
+            if ban.known_to(b.focal, b.chapter):
+                continue
+            for m in ban.markers:
+                if m.lower() in brief_text.lower():
+                    leaks.append(f"гл. {b.chapter} ({b.focal}): {ban.ban_id} «{m}» в сценах/закладках")
     assert not leaks, "\n".join(leaks)
 
 
