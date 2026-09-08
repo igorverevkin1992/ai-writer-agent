@@ -206,6 +206,13 @@ def part_range_for(exports_dir: Path, chapter: int) -> tuple[int, int] | None:
     return None
 
 
+_TAIL_BLOCK_RE = re.compile(r"<!-- ХВОСТ ПРОЗЫ[^>]*-->.*?<!-- КОНЕЦ ХВОСТА -->", re.DOTALL)
+
+
+def _strip_prose_tail(window: str) -> str:
+    return _TAIL_BLOCK_RE.sub("", window)
+
+
 def analyze(
     raw: str,
     window_raw: str,
@@ -323,7 +330,9 @@ def analyze(
 
     # FR-V1.6 — вставка окна («утечка промпта»)
     leak_n = int(_norm_value(norms, "утечка_нграмма"))
-    win_tokens = textutils.normalize(window_raw)
+    # хвост предыдущей главы в окне — цитата канона для сцепки голоса, не промпт: из проверки
+    # утечки исключается (повтор канона ловит V1.7 по корпусу)
+    win_tokens = textutils.normalize(_strip_prose_tail(window_raw))
     leaks = (
         _matching_runs(tokens, set(textutils.ngrams(win_tokens, leak_n)), leak_n) if win_tokens else []
     )

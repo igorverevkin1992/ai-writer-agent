@@ -51,9 +51,106 @@ def _style_sections(library: Path) -> str:
         if not m:
             continue
         num = m.group(1)
-        if num in {"1", "2", "3", "4", "6.1"}:
+        # §5 «Референсная формула» с числовыми ориентирами Р-015 и эталоны/анти-эталоны §6.2–6.3 —
+        # калибровка голоса, без которой Писатель уходит в телеграф (аудит 2, находка 1.9)
+        if num in {"1", "2", "3", "4", "5", "6.1", "6.2", "6.3"}:
             wanted.append(f"### {s.title}\n{s.body}")
     return "\n\n".join(wanted)
+
+
+# ------------------------------------------------------------ «что было раньше»
+
+PRIOR_EVENTS_MAX = 24        # событий сетки предыдущих глав с участием фокала
+PRIOR_CONTINUITY_MAX = 30    # закреплённых деталей континуити
+PRIOR_TAIL_CHARS = 1200      # хвост предыдущей главы того же фокала (сцепка голоса)
+PRIOR_TAIL_PARAGRAPHS = 3
+TAIL_BEGIN = "<!-- ХВОСТ ПРОЗЫ: не повторять, исключён из V1.6 -->"
+TAIL_END = "<!-- КОНЕЦ ХВОСТА -->"
+
+
+def _focal_markers(brief: Brief, infobans: list) -> list[str]:
+    return [m for b in infobans if b.secret and not b.known_to(brief.focal, brief.chapter) for m in b.markers]
+
+
+def prior_events(briefs: list[Brief], brief: Brief, infobans: list) -> list[str]:
+    """События сетки 2.2 предыдущих глав, где фокал был фокалом или участником, — память фокала.
+    Фразы с маркерами незнакомых ему тайн и с будущими томами вычищаются тем же фильтром, что досье."""
+    markers = _focal_markers(brief, infobans)
+    out: list[str] = []
+    for b in sorted(briefs, key=lambda x: x.chapter):
+        if b.volume != brief.volume or b.chapter >= brief.chapter:
+            continue
+        if brief.focal not in ([b.focal] + list(b.participants)):
+            continue
+        event = _safe_sentences(" ".join(b.beats[:1]) if b.beats else "", markers, brief.volume)
+        if not event:
+            continue
+        how = "фокал" if b.focal == brief.focal else f"глазами: {b.focal}"
+        out.append(f"гл. {b.chapter} ({b.date or 'дата не указана'}; {how}): {event}")
+    return out[-PRIOR_EVENTS_MAX:]
+
+
+_CONT_CH_RE = re.compile(r"гл\.\s*(\d+)")
+
+
+def _present(briefs: list[Brief], volume: int) -> dict[int, set[str]]:
+    """Кто был в каждой главе тома: фокал + участники сцен (по брифам)."""
+    return {b.chapter: {b.focal, *b.participants} - {""} for b in briefs if b.volume == volume}
+
+
+def prior_continuity(events: list, brief: Brief, infobans: list, participants: list[str], briefs: list[Brief] | None = None) -> list[str]:
+    """Закреплённые детали континуити 3.3, касающиеся участников сцены (внешность, предметы, кабинет):
+    без них Писатель дрейфует (аудит 2, находка 1.7). FR-C3: деталь показывается фокалу, только если
+    он ПРИСУТСТВОВАЛ в главе, где она закреплена, либо это внешность/манера участника сцены
+    («Имя: …» — видна любому, кто с ним встречался). Зола в печи Лемма (гл. 6, Лемм один) Штерну не показывается."""
+    markers = _focal_markers(brief, infobans)
+    names = [n for n in participants if n]
+    low_names = [n.lower() for n in names]
+    present = _present(briefs or [], brief.volume)
+    out: list[str] = []
+    for e in events:
+        chs = [int(x) for x in re.findall(r"\d+", e.chapters or "")] or [int(x) for x in _CONT_CH_RE.findall(e.date or "")]
+        if not chs or min(chs) >= brief.chapter:
+            continue
+        low = e.event.lower()
+        if low_names and not any(n in low for n in low_names):
+            continue
+        appearance = any(e.event.startswith(f"{n}:") or e.event.startswith(f"{n} ") and ":" in e.event[:40] for n in names)
+        was_there = any(brief.focal in present.get(ch, set()) for ch in chs)
+        if not (was_there or appearance):
+            continue
+        text = _safe_sentences(e.event, markers, brief.volume)
+        if text:
+            out.append(f"{text} ({e.date})" if e.date else text)
+    return out[:PRIOR_CONTINUITY_MAX]
+
+
+def prior_tail(library: Path, briefs: list[Brief], brief: Brief) -> tuple[int | None, str]:
+    """Финал последней принятой в канон главы ТОГО ЖЕ фокала перед текущей — только для сцепки голоса.
+    Текст уже прошёл Э2 и написан из головы фокала, поэтому FR-C3 не нарушает; из проверки утечки
+    окна (V1.6) исключается маркерами TAIL_BEGIN/TAIL_END."""
+    focal_chapters = {b.chapter for b in briefs if b.volume == brief.volume and b.focal == brief.focal and b.chapter < brief.chapter}
+    best: tuple[int, Path] | None = None
+    for path in (library / "Проза").glob(f"Том{brief.volume}_Глава*.md") if (library / "Проза").exists() else []:
+        m = re.search(r"Глава(\d+)", path.name)
+        if not m:
+            continue
+        ch = int(m.group(1))
+        if ch in focal_chapters and (best is None or ch > best[0]):
+            best = (ch, path)
+    if best is None:
+        return None, ""
+    text = best[1].read_text(encoding="utf-8")
+    paragraphs = [
+        pg.strip() for pg in re.split(r"\n\s*\n", text)
+        # служебное: заголовки, линейки, курсивные пометки («*Конец макета v2. Правки автора…*»)
+        if pg.strip() and not pg.strip().startswith(("#", "---", "***")) and not re.fullmatch(r"\*[^*]+\*", pg.strip())
+    ]
+    tail = "\n\n".join(paragraphs[-PRIOR_TAIL_PARAGRAPHS:])
+    if len(tail) > PRIOR_TAIL_CHARS:
+        tail = tail[-PRIOR_TAIL_CHARS:]
+        tail = tail[tail.find(" ") + 1:] if " " in tail[:80] else tail
+    return best[0], tail
 
 
 def _focalization_laws(library: Path) -> str:
@@ -189,6 +286,7 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
     """Собирает окно главы N. Возвращает (путь, раскладка размеров по секциям)."""
     exports_dir = ws.exports
     brief = exporter.load_brief(exports_dir, chapter)
+    briefs = exporter.load_briefs(exports_dir)
     norms = exporter.load_norms(exports_dir)
     stoplists = exporter.load_stoplists(exports_dir)
     matrix = exporter.load_matrix(exports_dir)
@@ -247,9 +345,22 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
     except FileNotFoundError:
         drama = circles.frame_for_chapter([], [], chapter)
 
+    # «что было раньше» глазами фокала (аудит 2, вывод 1): события, детали, хвост предыдущей главы
+    try:
+        continuity = exporter.load_continuity(exports_dir)
+    except FileNotFoundError:
+        continuity = []
+    tail_chapter, tail_text = prior_tail(library, briefs, brief)
+
     env = Environment(undefined=StrictUndefined, trim_blocks=False, lstrip_blocks=False)
     window = env.from_string(_template_text(ws)).render(
         brief=brief,
+        prior_events=prior_events(briefs, brief, infobans),
+        prior_continuity=prior_continuity(continuity, brief, infobans, participants, briefs),
+        prior_tail_chapter=tail_chapter,
+        prior_tail=tail_text,
+        tail_begin=TAIL_BEGIN,
+        tail_end=TAIL_END,
         norms={k: v for k, v in norms.items() if k in WINDOW_NORM_IDS},
         style_sections=_style_sections(library),
         focalization_laws=_focalization_laws(library),
