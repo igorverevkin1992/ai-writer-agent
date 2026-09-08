@@ -4,6 +4,7 @@
 пропускаются, если она не подключена (как в tests/test_real_canon.py).
 """
 
+import json
 import shutil
 from pathlib import Path
 
@@ -229,7 +230,8 @@ def test_документы_вставки_в_окне(real):
     assert b2.documents and b2.documents[0].startswith("№1 (после главы): первый рапорт")
     assert "входит: гордость назначением; выходит: первые заметки" in b2.scenes[0]
     w2 = compiler.compile_window(real, LIBRARY, 2)[0].read_text(encoding="utf-8")
-    assert "Документ-вставка №1 (после главы): первый рапорт" in w2
+    assert "## Документ-вставка №1" in w2 and "- По поглавнику: первый рапорт — чистый канцелярит" in w2
+    assert w2.count("Документ-вставка №1") == 1  # §6 реестра и строка поглавника слиты, не продублированы
     assert exporter.load_brief(real.exports, 8).documents[0].startswith("№2")
     assert exporter.load_brief(real.exports, 5).documents == []
 
@@ -288,3 +290,65 @@ def test_континуити_и_отношения_реального_кано�
     compiler.compile_window(real, LIBRARY, 5)
     ttr = next(c for c in verifier1.run_verify1(real, 5, 1).checks if c.check_id == "V1.8b_ttr_окно")
     assert "том 1, гл. 1–9" in ttr.note and "Том1_Глава05" not in ttr.note  # часть I, без самой главы
+
+
+# ---------------------------------------- аудит 2, 1.1: §5 дозы и §6 документы — синтетика и демо
+
+
+def test_дозы_и_документы_без_разделов_и_в_демо(tmp_path, ws):
+    reg = tmp_path / "УГАР_Том1_Реестр_информационного_режима.md"
+    reg.write_text(
+        "# «УГАР». Том 1 (1926)\n\n## 7. Реестр дальних закладок\n\n"
+        "| Закладка | Где лежит | Где стреляет |\n|---|---|---|\n| Часы | Гл. 4 | Том 2 |\n",
+        encoding="utf-8",
+    )
+    assert realcanon.parse_doses(reg) == [] and realcanon.parse_documents(reg) == []
+    # демо-библиотека без реестра информрежима: выгрузки — пустые списки, не ошибка
+    assert exporter.load_doses(ws.exports) == [] and exporter.load_documents(ws.exports) == []
+    manifest = json.loads((ws.exports / "manifest.json").read_text(encoding="utf-8"))
+    assert {"doses.json", "documents.json"} <= set(manifest["files"])
+
+
+def test_разбор_доз_правило_по_адресу_и_шкала_документов(tmp_path):
+    reg = tmp_path / "УГАР_Том2_Реестр_информационного_режима.md"
+    reg.write_text(
+        "# «УГАР». Том 2 (1927)\n\n## 5. Две дозы прошлого (канал воспоминаний)\n\nФорма дозы.\n\n"
+        "| Доза | Глава | Триггер | Что получает читатель | Чего НЕ получает |\n|---|---|---|---|---|\n"
+        "| №1 | 3 | Письмо | Был брат | Судьбу брата |\n| №2 | 9 | Фото | Брат жив | Где он |\n\n"
+        "Правило доз: тон сухой. «Окно» — только в дозе №2 и в гл. 40. Никакого сентимента.\n\n---\n\n"
+        "## 6. Реестр документов (письма Ольги)\n\nПисьмо верстается как письмо.\n\n"
+        "| № | После гл. | Стиль | Расхождение с правдой, которую видел читатель |\n|---|---|---|---|\n"
+        "| 1 | 3 | Сухой | Нет |\n| 2 | 9 | Живой | **Умолчание:** нет даты |\n\n"
+        "Языковая шкала писем (для написания): №1–1 — штампы; №2–2 — живые детали. К тому 5 — как у Лемма.\n",
+        encoding="utf-8",
+    )
+    doses = realcanon.parse_doses(reg)
+    assert [(d.dose_id, d.chapter, d.volume, d.form) for d in doses] == [("№1", 3, 2, "Форма дозы."), ("№2", 9, 2, "Форма дозы.")]
+    assert doses[0].rule == "тон сухой. Никакого сентимента."
+    assert doses[1].rule == "тон сухой. «Окно» — только в дозе №2 и в гл. 40. Никакого сентимента."
+    docs = realcanon.parse_documents(reg)
+    assert [(d.number, d.after_chapter, d.volume, d.kind) for d in docs] == [(1, 3, 2, "письма Ольги"), (2, 9, 2, "письма Ольги")]
+    assert docs[0].scale == "№1–1 — штампы" and docs[1].scale == "№2–2 — живые детали"
+    assert docs[1].divergence == "**Умолчание:** нет даты" and docs[0].form == "Письмо верстается как письмо."
+
+
+def test_документ_главы_сливает_реестр_и_поглавник(tmp_path):
+    exports = tmp_path / "exports"
+    exports.mkdir()
+    (exports / "documents.json").write_text(
+        json.dumps([{"number": 1, "after_chapter": 2, "volume": 1, "kind": "рапорты", "style": "Сухой",
+                     "divergence": "Нет", "form": "", "scale": "№1–3 — штампы"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (exports / "doses.json").write_text("[]", encoding="utf-8")
+    brief = Brief(chapter=2, focal="Степан", documents=["№1 (после главы): первый рапорт."])
+    docs = compiler.chapter_documents(exports, brief)
+    assert len(docs) == 1 and docs[0]["note"] == "первый рапорт." and docs[0]["style"] == "Сухой"
+    assert docs[0]["position"] == "после главы" and docs[0]["scale"] == "№1–3 — штампы"
+    assert compiler.chapter_documents(exports, Brief(chapter=3, focal="Степан")) == []
+    # документ только из поглавника (реестра §6 нет) — секция всё равно есть
+    only23 = compiler.chapter_documents(exports, Brief(chapter=7, focal="Лемм", documents=["№9 (в середине главы): записка"]))
+    assert only23 == [{"number": 9, "kind": "", "position": "в середине главы", "note": "записка",
+                       "style": "", "divergence": "", "scale": "", "form": ""}]
+    assert compiler.chapter_doses(exports, brief) == []
+    assert compiler.chapter_doses(tmp_path / "нет", brief) == []  # старые выгрузки без doses.json — не падаем
