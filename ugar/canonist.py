@@ -247,6 +247,11 @@ def apply_batch(ws: Workspace, cfg: Config, library: Path, chapter: int, draft: 
             "библиотека не под git — без коммита приёмки откат невозможен (FR-K2): "
             "инициализируйте репозиторий (git init в библиотеке), затем повторите."
         )
+    if gitops.in_progress(library):
+        raise RuntimeError(
+            f"в библиотеке незавершённая операция git ({gitops.in_progress(library)}) — в документах могут быть "
+            "маркеры конфликта; завершите или отмените её (`git revert --abort` / `git merge --abort`), затем повторите."
+        )
     if gitops.dirty(library):
         raise RuntimeError(
             "в библиотеке незакоммиченные изменения — применение пакета требует чистого git "

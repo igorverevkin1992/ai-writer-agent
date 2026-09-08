@@ -207,33 +207,47 @@ class PanelAPI:
         from .cli import NEXT_STEP, _chapter_flags_summary
 
         chapters = []
-        for st in all_states(self.ws):
-            e1, e2 = _chapter_flags_summary(self.ws, st.chapter)
-            machine_s, author_s = timing.chapter_times(st.data.get("история", []))
-            chapters.append(
-                {
-                    "chapter": st.chapter,
-                    "state": st.state,
-                    "draft": st.draft,
-                    "e1": e1,
-                    "e2": e2,
-                    "author_min": round(author_s / 60, 1),
-                    "machine_min": round(machine_s / 60, 1),
-                    "next": NEXT_STEP.get(st.state, "").format(n=st.chapter),
-                }
-            )
+        # Одна повреждённая глава (пустой status.yaml, битый verdict.json) — карточка «повреждено»
+        # с причиной, а не 500 для всей панели (4.8).
+        for d in sorted(self.ws.chapters.iterdir()) if self.ws.chapters.exists() else []:
+            if not (d.is_dir() and d.name.isdigit()):
+                continue
+            n = int(d.name)
+            try:
+                st = ChapterState(self.ws, n)
+                e1, e2 = _chapter_flags_summary(self.ws, n)
+                machine_s, author_s = timing.chapter_times(st.data.get("история", []))
+                chapters.append(
+                    {
+                        "chapter": n,
+                        "state": st.state,
+                        "draft": st.draft,
+                        "e1": e1,
+                        "e2": e2,
+                        "author_min": round(author_s / 60, 1),
+                        "machine_min": round(machine_s / 60, 1),
+                        "next": NEXT_STEP.get(st.state, "").format(n=n),
+                    }
+                )
+            except Exception as e:  # noqa: BLE001 — обзор не должен падать из-за одного файла
+                chapters.append({"chapter": n, "state": "повреждено", "draft": 0, "e1": "—", "e2": "—",
+                                 "author_min": 0, "machine_min": 0, "next": f"файлы главы повреждены: {e}"})
         try:
             briefs = [
                 {"chapter": b.chapter, "volume": b.volume, "focal": b.focal, "date": b.date}
                 for b in exporter.load_briefs(self.ws.exports)
             ]
-        except FileNotFoundError:
+        except Exception:  # noqa: BLE001 — нет выгрузок или устаревшая схема: «Экспорт канона» пересоберёт
             briefs = []
+        try:
+            green = regression.is_green(self.ws)
+        except Exception:  # noqa: BLE001 — битый report.json = «регрессия не запускалась»
+            green = None
         return {
             "workspace": str(self.ws.root),
             "chapters": chapters,
             "briefs": briefs,
-            "regression_green": regression.is_green(self.ws),
+            "regression_green": green,
             "models": {"writer": self.cfg.writer.model, "verifier2": self.cfg.verifier2.model},
             "job": self.jobs.summary(),
             "lint": self.lint_summary(),

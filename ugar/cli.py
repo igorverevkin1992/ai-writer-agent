@@ -425,6 +425,19 @@ def cmd_canonize(
             "библиотека не под git — применение пакета невозможно (FR-K2: откат только git-revert'ом). "
             "Инициализируйте репозиторий в библиотеке (git init; git add -A; git commit), затем повторите."
         )
+    # Идемпотентность (4.1): если приёмка уже закоммичена, а состояние не успело смениться
+    # (сбой между коммитом и записью status.yaml), повтор НЕ применяет пакет второй раз —
+    # он восстанавливает состояние по действующему коммиту «[глава N]».
+    existing = gitops.find_chapter_commit(lib, chapter)
+    if existing:
+        st.data["коммит_приёмки"] = existing
+        st.transition("зафиксировано", "canonize --apply (восстановление по коммиту)")
+        typer.secho(
+            f"Пакет главы {chapter} уже применён коммитом {existing[:10]} — повторное применение "
+            f"продублировало бы записи. Состояние восстановлено: «зафиксировано».",
+            fg=typer.colors.YELLOW,
+        )
+        return
     if not yes and not typer.confirm(
         f"Применить пакет главы {chapter} к УГАР_Библиотека/ и закоммитить? (Д-8) (y)"
     ):
@@ -875,6 +888,8 @@ def cmd_doctor() -> None:
         if gitops.is_repo(lib):
             item(gitops.has_identity(lib) or bool(cfg.commit_author), "авторство git настроено",
                  "git config user.email/user.name или commit_author в config.yaml (Д-8)")
+            item(gitops.in_progress(lib) is None, "нет незавершённых операций git в библиотеке",
+                 f"завершите или отмените: git {gitops.in_progress(lib) or ''} --abort (в документах могут быть маркеры конфликта)")
             n_remotes = len(gitops.remotes(lib))
             item(n_remotes >= cfg.backup_remotes_min, f"удалённых копий: {n_remotes} (нужно ≥{cfg.backup_remotes_min})",
                  "добавьте git remote (NFR-6)")
@@ -923,6 +938,11 @@ def cmd_rollback(
             _fail(f"глава {chapter} ещё не начата — откатывать некуда.")
         to = STATES[idx - 1]
         typer.echo(f"Откат на шаг назад: «{st.state}» → «{to}».")
+    # Проверка цели ДО любых побочных эффектов (4.2): опечатка в --to не должна стоить git revert'а
+    if to not in STATES:
+        _fail(f"неизвестное состояние «{to}»; допустимые: {', '.join(STATES)}.")
+    if STATES.index(to) >= STATES.index(st.state):
+        _fail(f"откат возможен только назад: «{st.state}» → «{to}» не является откатом.")
     if st.state == "зафиксировано":
         # только git-revert коммита приёмки с пересчётом выгрузок и корпуса
         sha = st.data.get("коммит_приёмки") or gitops.find_chapter_commit(lib, chapter)
@@ -931,13 +951,13 @@ def cmd_rollback(
         if not yes and not typer.confirm(f"git revert {sha[:10]} (приёмка главы {chapter}) и пересчёт выгрузок? (y)"):
             raise typer.Exit()
         try:
-            gitops.revert(lib, sha)
+            gitops.revert(lib, sha, author=cfg.commit_author)
         except RuntimeError as e:
-            _fail(f"откат не выполнен: {e}")
+            _fail(f"откат не выполнен, библиотека не тронута: {e}")
         # состояние — сразу после успешного реверта, чтобы повторный откат не «ревертил реверт»
         st.data["состояние"] = "принято"
         st.data.pop("коммит_приёмки", None)
-        st.data["история"].append(
+        st.data.setdefault("история", []).append(
             {"из": "зафиксировано", "в": "принято", "время": datetime.now(timezone.utc).isoformat(), "команда": "rollback (git revert)"}
         )
         st._save()
@@ -1153,6 +1173,11 @@ def cmd_canon_commit(
     ws, cfg, lib = _ctx()
     if not gitops.is_repo(lib):
         _fail("библиотека не под git — инициализируйте репозиторий.")
+    if gitops.in_progress(lib):
+        _fail(
+            f"в библиотеке незавершённая операция git ({gitops.in_progress(lib)}) — в документах могут быть маркеры "
+            "конфликта «<<<<<<<»; завершите или отмените её (`git revert --abort`), затем повторите."
+        )
     manifest = ws.exports / "manifest.json"
     old_norms_hash = None
     if manifest.exists():
@@ -1176,7 +1201,7 @@ def cmd_canon_commit(
         return
     from . import lint as lint_mod
 
-    report = lint_mod.run_lint(lib, ws.exports, ws.logs)
+    report = lint_mod.run_lint(lib, ws.exports, ws.logs, export=False)  # выгрузки только что пересобраны
     if report.errors or report.warnings:
         typer.secho(
             f"⚠ Проверка канона: ошибок {report.errors}, предупреждений {report.warnings} (logs/lint.md) — "

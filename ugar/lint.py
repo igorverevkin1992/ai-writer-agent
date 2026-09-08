@@ -418,11 +418,13 @@ def check_prose(library: Path, briefs: list[Brief], infobans: list[InfoBan], sto
 # ------------------------------------------------------------------ прогон
 
 
-def run_lint(library: Path, exports_dir: Path, logs_dir: Path) -> LintReport:
-    """Машинный слой: экспорт (валидация Д-1) + все проверки. Ничего не пишет в библиотеку."""
+def run_lint(library: Path, exports_dir: Path, logs_dir: Path, export: bool = True) -> LintReport:
+    """Машинный слой: экспорт (валидация Д-1) + все проверки. Ничего не пишет в библиотеку.
+    `export=False` — выгрузки уже актуальны (вызывающий только что сделал экспорт): без второго прогона."""
     findings: list[LintFinding] = []
     try:
-        exporter.run_export(library, exports_dir, logs_dir)
+        if export:
+            exporter.run_export(library, exports_dir, logs_dir)
     except MarkupError as e:
         rel = _rel(library, Path(e.path)) if getattr(e, "path", None) else ""
         findings.append(LintFinding(code="РАЗМ-1", severity="ошибка", file=rel, line=getattr(e, "line", None),

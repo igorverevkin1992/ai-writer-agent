@@ -160,7 +160,11 @@ def test_откат_не_ревертит_реверт_и_не_трогает_ч
     sha = gitops.commit_all(library, "[глава 9] приёмка: записей 0")
     gitops.revert(library, sha)
     assert not (library / "Проза" / "Том1_Глава09.md").exists()
-    assert gitops.find_chapter_commit(library, 9) == sha  # revert-коммит пропускается
+    # откачённая приёмка — не приёмка: повторный canonize --apply не должен её «находить» (4.1)
+    assert gitops.find_chapter_commit(library, 9) is None
+    (library / "Проза" / "Том1_Глава09.md").write_text("Глава заново.\n", encoding="utf-8")
+    sha2 = gitops.commit_all(library, "[глава 9] приёмка: повторная")
+    assert gitops.find_chapter_commit(library, 9) == sha2  # новая приёмка после отката — действующая
     # коммит, задевающий файл вне библиотеки, откатить нельзя
     (ws.root / "код.py").write_text("x", encoding="utf-8")
     (library / "Проза" / "Том1_Глава09.md").write_text("снова", encoding="utf-8")
@@ -267,4 +271,4 @@ def test_откат_зафиксированной_главы_по_sha_из_ст
     r = runner.invoke(app, ["rollback", str(chapter), "--to", "собрано", "-y"])
     assert r.exit_code == 0, r.output
     assert not (library / "Проза" / "Том1_Глава01.md").exists()
-    assert gitops.find_chapter_commit(library, chapter) == sha
+    assert gitops.find_chapter_commit(library, chapter) is None  # приёмка откачена — действующей нет

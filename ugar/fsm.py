@@ -52,13 +52,26 @@ class TransitionError(RuntimeError):
     pass
 
 
+class StatusFileError(RuntimeError):
+    """status.yaml главы нечитаем: одна повреждённая глава не должна ломать обзор всех остальных."""
+
+
 class ChapterState:
     def __init__(self, ws: Workspace, chapter: int):
         self.ws = ws
         self.chapter = chapter
         self.path: Path = ws.status_path(chapter)
         if self.path.exists():
-            self.data = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
+            try:
+                data = yaml.safe_load(self.path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as e:
+                raise StatusFileError(f"chapters/{chapter:03d}/status.yaml повреждён (не YAML): {e}") from None
+            if not isinstance(data, dict) or data.get("состояние") not in STATES:
+                raise StatusFileError(
+                    f"chapters/{chapter:03d}/status.yaml повреждён: нет допустимого поля «состояние» "
+                    f"(файл пуст или усечён). Восстановите его из истории/бэкапа или удалите папку главы."
+                )
+            self.data = data
         else:
             self.data = {"глава": chapter, "состояние": "не-начато", "черновик": 0, "авто_повторов": 0, "итераций_правок": 0, "история": []}
 
@@ -94,6 +107,13 @@ class ChapterState:
             raise TransitionError(
                 f"Откат возможен только назад: «{self.state}» → «{to}» не является откатом."
             )
+        # Счётчики §5.4 привязаны к циклу, который откат прерывает: откат раньше цикла правок
+        # обнуляет бюджет итераций, откат раньше верификации — бюджет авто-повторов. Иначе после
+        # трёх итераций любой будущий цикл правок главы отказывал бы навсегда.
+        if STATES.index(to) < STATES.index("на-приёмке"):
+            self.data["итераций_правок"] = 0
+        if STATES.index(to) < STATES.index("верифицировано-1"):
+            self.data["авто_повторов"] = 0
         self._move(to, cmd)
 
     def _record(self, frm: str, to: str, cmd: str) -> None:
