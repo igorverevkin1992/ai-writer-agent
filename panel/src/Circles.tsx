@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "./api";
 import type { Notify, RunCommand } from "./App";
 import type { Confirm } from "./Confirm";
+import { RestoredNote, useDraft } from "./drafts";
 import { usePending } from "./hooks";
 
 interface Step { n: number; name: string; text: string; chapters?: string }
@@ -37,7 +38,10 @@ export function Circles(props: {
   const [data, setData] = useState<CirclesData | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [manualStem, setManualStem] = useState<string>("");
-  const [pasted, setPasted] = useState("");
+  // вставленный ответ модели (ручной режим) — в localStorage и в реестре «не сохранено» (аудит 5.3)
+  const ds = useDraft("круги:ручной", "", "в ручном режиме «Кругов истории»");
+  const pasted = ds.text;
+  const setPasted = ds.setText;
   const [pending, run] = usePending();
   const busy = jobBusy || pending;
 
@@ -87,7 +91,7 @@ export function Circles(props: {
       try {
         await apiPost("/api/circles/manual", { scope: m[1], key: m[2] ? +m[2] : null, text: pasted });
         notify("Круг принят.", "ok");
-        setPasted("");
+        ds.discard(); // принято сервером — черновик больше не нужен
         load();
       } catch (e) {
         notify(String(e));
@@ -141,6 +145,7 @@ export function Circles(props: {
           {manualStem && (
             <>
               <p className="muted">Ответ модели для «{manualStem}»:</p>
+              <RestoredNote state={ds} />
               <textarea aria-label="Ответ модели" value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="Вставьте JSON-ответ модели" />
               <div className="actions">
                 <button className="primary" disabled={busy || !pasted.trim()} onClick={acceptManual}>Принять круг</button>

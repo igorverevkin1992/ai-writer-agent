@@ -606,7 +606,7 @@ class PanelAPI:
         text = text if text.endswith("\n") else text + "\n"
         with self.jobs.exclusive():
             if version is not None and path.exists() and self._version(path.read_text(encoding="utf-8")) != version:
-                raise RuntimeError("документ изменён на диске после открытия — перечитайте его, чтобы не затереть чужую правку")
+                raise VersionConflict("документ изменён на диске после открытия — перечитайте его, чтобы не затереть чужую правку")
             with guard.canon_write_session():
                 guard.write_text(path, text)
         self.watcher._snapshot = self.watcher._scan()  # своя запись — не «внешнее» изменение
@@ -680,6 +680,10 @@ MIME = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".sv
 
 class _BodyTooLarge(Exception):
     pass
+
+
+class VersionConflict(RuntimeError):
+    """Документ канона изменён на диске после того, как автор его открыл (версия = sha256 содержимого) → 409."""
 
 
 def _local_hosts(port: int) -> set[str]:
@@ -863,6 +867,9 @@ def make_handler(api: PanelAPI):
             except _BodyTooLarge:
                 self.close_connection = True
                 self._error(f"тело запроса больше {MAX_BODY // (1024 * 1024)} МБ", 413)
+            except VersionConflict as e:
+                # отдельный код: панель предлагает «различия / перечитать / перезаписать» (аудит 5.2)
+                self._json({"error": str(e), "code": "конфликт"}, 409)
             except (ValueError, RuntimeError) as e:
                 self._error(str(e), 400)
             except Exception as e:

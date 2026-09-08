@@ -4,6 +4,7 @@ import { ChapterView } from "./ChapterView";
 import { Canon } from "./Canon";
 import { Circles } from "./Circles";
 import { useConfirm } from "./Confirm";
+import { createDirtyRegistry, DirtyContext } from "./drafts";
 import { usePending } from "./hooks";
 import type { ApiLogRow, AppState, Job } from "./types";
 
@@ -25,6 +26,8 @@ const POLL_IDLE_MS = 2500;
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [view, setView] = useState<View | null>(null);
+  const viewRef = useRef<View | null>(null);
+  viewRef.current = view;
   const [toast, setToast] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const [query, setQuery] = useState("");
@@ -34,6 +37,9 @@ export default function App() {
   const toastTimer = useRef<number | undefined>(undefined);
   const [confirm, confirmDialog] = useConfirm();
   const [pending, run] = usePending();
+  // единый реестр «не сохранено» (аудит 5.1–5.3): поля ввода регистрируются по ключу,
+  // смена вида проходит через go(), закрытие страницы — через beforeunload
+  const dirty = useRef(createDirtyRegistry()).current;
 
   const notify: Notify = useCallback((text, kind = "err") => {
     window.clearTimeout(toastTimer.current);
@@ -75,6 +81,29 @@ export default function App() {
     }
   }, [state, view]);
 
+  useEffect(() => {
+    const onUnload = (e: BeforeUnloadEvent) => {
+      if (dirty.entries().length === 0) return;
+      e.preventDefault();
+      e.returnValue = ""; // браузер показывает свой диалог; черновик уже в localStorage
+    };
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, [dirty]);
+
+  /** Смена вида с защитой несохранённого текста: тот же вид — без вопросов. */
+  const go = useCallback(
+    async (next: View) => {
+      const cur = viewRef.current;
+      if (cur !== null && sameView(cur, next)) return;
+      const q = dirty.question();
+      if (q && !(await confirm(q))) return;
+      if (q) dirty.leave();
+      setView(next);
+    },
+    [dirty, confirm],
+  );
+
   const runCommand: RunCommand = useCallback(
     async (cmd, chapter, params) => {
       try {
@@ -96,6 +125,7 @@ export default function App() {
   const isActive = (n: number) => view?.kind === "глава" && view.n === n;
 
   return (
+    <DirtyContext.Provider value={dirty}>
     <div className="layout">
       <aside className="sidebar">
         <div className="brand">КОНВЕЙЕР УГАР</div>
@@ -111,16 +141,16 @@ export default function App() {
         <div className="sidebtns">
           <button disabled={busy} onClick={() => run(() => runCommand("export"))}>Экспорт канона</button>
           <button disabled={busy} onClick={() => run(() => runCommand("regress"))}>Регрессия</button>
-          <button className={view?.kind === "дашборд" ? "primary" : ""} onClick={() => setView({ kind: "дашборд" })}>
+          <button className={view?.kind === "дашборд" ? "primary" : ""} onClick={() => go({ kind: "дашборд" })}>
             Дашборд
           </button>
-          <button className={view?.kind === "журнал" ? "primary" : ""} onClick={() => setView({ kind: "журнал" })}>
+          <button className={view?.kind === "журнал" ? "primary" : ""} onClick={() => go({ kind: "журнал" })}>
             Журнал API
           </button>
-          <button className={view?.kind === "круги" ? "primary" : ""} onClick={() => setView({ kind: "круги" })}>
+          <button className={view?.kind === "круги" ? "primary" : ""} onClick={() => go({ kind: "круги" })}>
             Круги истории
           </button>
-          <button className={view?.kind === "канон" ? "primary" : ""} onClick={() => setView({ kind: "канон" })}>
+          <button className={view?.kind === "канон" ? "primary" : ""} onClick={() => go({ kind: "канон" })}>
             Канон{state.lint?.errors ? ` (${state.lint.errors})` : ""}
           </button>
         </div>
@@ -129,7 +159,7 @@ export default function App() {
           className="sidebtns"
           onSubmit={(e) => {
             e.preventDefault();
-            if (query.trim()) setView({ kind: "поиск", q: query.trim() });
+            if (query.trim()) go({ kind: "поиск", q: query.trim() });
           }}
         >
           <input
@@ -144,7 +174,7 @@ export default function App() {
         <div className="muted" style={{ margin: "6px 0" }} id="queue-title">Очередь глав</div>
         <div role="list" aria-labelledby="queue-title">
           {state.chapters.map((c) => (
-            <QueueItem key={c.chapter} active={isActive(c.chapter)} onOpen={() => setView({ kind: "глава", n: c.chapter })}>
+            <QueueItem key={c.chapter} active={isActive(c.chapter)} onOpen={() => go({ kind: "глава", n: c.chapter })}>
               <div className="row">
                 <strong>Глава {c.chapter}</strong>
                 <span className={`badge b-${c.state}`}>{c.state}</span>
@@ -156,7 +186,7 @@ export default function App() {
             </QueueItem>
           ))}
           {notStarted.map((b) => (
-            <QueueItem key={b.chapter} active={isActive(b.chapter)} onOpen={() => setView({ kind: "глава", n: b.chapter })}>
+            <QueueItem key={b.chapter} active={isActive(b.chapter)} onOpen={() => go({ kind: "глава", n: b.chapter })}>
               <div className="row">
                 <strong>Глава {b.chapter}</strong>
                 <span className="badge">не начата</span>
@@ -212,7 +242,15 @@ export default function App() {
       </div>
       {confirmDialog}
     </div>
+    </DirtyContext.Provider>
   );
+}
+
+function sameView(a: View, b: View): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "глава" && b.kind === "глава") return a.n === b.n;
+  if (a.kind === "поиск" && b.kind === "поиск") return a.q === b.q;
+  return true;
 }
 
 /** Элемент очереди глав: доступен с клавиатуры (Tab, Enter/Space) — аудит 5.7. */
