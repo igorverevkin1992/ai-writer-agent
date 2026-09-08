@@ -86,7 +86,84 @@ def test_окна_всех_глав_без_тайн_фокала(real):
         for fm in re.finditer(r"\bт\.\s*(\d+)|Ф-19\d\d", scan):
             if fm.group(1) is None or int(fm.group(1)) > b.volume:
                 leaks.append(f"гл. {b.chapter}: будущий том «{fm.group(0)}»")
+        # аудит 2, 1.3: арки и содержание тайн в отношениях, обрывки списков, пометки инструменту
+        dossiers = sections.get("персонажи сцены", "")
+        for phrase in ("расчёт, проросший", "к браку", "карманный инструмент", "от профессионального уважения",
+                       "⚠", "🔧", "инструмент обязан", "держать в каждой сцене", "при арке"):
+            if phrase in dossiers:
+                leaks.append(f"гл. {b.chapter} ({b.focal}): фраза «{phrase}»")
+        for line in dossiers.splitlines():
+            if line.rstrip().endswith(";") or ";;" in line:
+                leaks.append(f"гл. {b.chapter} ({b.focal}): обрывок списка «{line.strip()[:60]}»")
     assert not leaks, "\n".join(leaks)
+
+
+@real_only
+def test_кто_знает_из_реестра_и_матрицы(real):
+    """Аудит 2, 1.4–1.5: имя без главы в реестре берёт главу из матрицы; Т-10 с М-12 не сопоставляется."""
+    bans = {b.ban_id: b for b in exporter.load_infobans(real.exports) if b.secret}
+    assert bans["Т-08"].known_by["Степан"] == 43          # реестр «Степан», матрица М-14 «гл.43–44»
+    assert bans["Т-02"].known_by["Лемм"] == 3             # реестр «Лемм», матрица М-02 «гл.3»
+    assert bans["Т-10"].known_by == {}                    # «Никто. Ответ — том 2»: М-12 «третья рука» — не та тайна
+    assert bans["Т-07"].known_by == {"Лемм": 17}          # М-09: Лемм узнаёт о рапортах в гл. 17
+    matrix = exporter.load_matrix(real.exports)
+    assert realcanon._match_matrix_fact(bans["Т-10"].text, matrix) is None
+    assert realcanon._match_matrix_fact(bans["Т-07"].text, matrix) == "М-09"
+    assert realcanon._match_matrix_fact(bans["Т-08"].text, matrix) == "М-14"
+    assert realcanon._match_matrix_fact(bans["Т-05"].text, matrix) == "М-06"
+
+
+# --------------------------------------------------- фильтр досье (юнит)
+
+
+def test_фильтр_фраз_проверяет_все_ссылки_и_траектории():
+    f = compiler._safe_sentences
+    assert f("от искры (т.1) к браку", [], 1) == ""                       # траектория через тома
+    assert f("коллега (т.1). Служит в МУРе с т.1.", [], 1) == "коллега (т.1). Служит в МУРе с т.1."
+    assert f("знакомы с т.1; с т.8 — знание и молчание", [], 1) == ""     # вторая ссылка — будущее
+    assert f("«мальчик из папки» → напарник (т.9–10)", [], 1) == ""
+    assert f("до т.6 — коллега", [], 1) == "" and f("в томе 3 узнаёт", [], 1) == ""
+    assert f("Служил в цикле II", [], 1) == ""
+
+
+def test_фильтр_убирает_список_целиком_и_пометки_инструменту():
+    f = compiler._safe_sentences
+    text = ("Тройная идентичность: для МУРа — буржуазный спец; для ОГПУ — карманный инструмент; "
+            "тайно — спящий актив сети. Рожд. ≈1871.")
+    assert f(text, ["актив"], 1) == "Рожд. ≈1871."                          # обрывка «…инструмент;» нет
+    assert f(text, [], 1) == text                                           # без маркера список цел
+    assert f("надзиратель → инструмент → сын-по-выбору; вектор: расчёт", ["расчёт"], 1) == ""
+    assert f("Закон: лозунги — хуже (держать в каждой сцене; инструмент обязан проверять корреляцию).", [], 1) \
+        == "Закон: лозунги — хуже."
+    assert f("канал присмотра (⚠)", [], 1) == "канал присмотра"
+    assert f("куратор вербовки (⚠ уточнить при арке т.7)", [], 1) == "куратор вербовки"
+    assert f("⚠ решить при арке. Спокоен.", [], 1) == "Спокоен."
+
+
+def test_разбор_кто_знает_и_слияние_с_матрицей():
+    names = {"Лемм", "Штерн", "Степан", "Заварзин"}
+    reg = realcanon._parse_known_by("Степан; Штерн — гл. 45", names)
+    assert reg == {"Степан": None, "Штерн": 45}
+    assert realcanon._parse_known_by("Никто. Ответ — том 2", names) == {}
+    assert realcanon._parse_known_by("Лемм; Заварзин узнает в томе 3", names) == {"Лемм": None}
+    assert realcanon._merge_known(reg, {"Степан": 43, "Штерн": 45}) == {"Степан": 43, "Штерн": 45}
+    assert realcanon._merge_known(reg, {}) == {"Степан": 0, "Штерн": 45}                 # нигде главы нет — всегда
+    assert realcanon._merge_known({"Лемм": 17}, {"Лемм": 3, "Штерн": 7}) == {"Лемм": 3, "Штерн": 7}  # ранняя
+
+
+def test_сопоставление_тайны_с_фактом_матрицы():
+    from ugar.schemas import MatrixFact
+
+    def fact(fid, text):
+        return MatrixFact(fact_id=fid, fact=text, subject="Читатель", from_chapter=1)
+
+    matrix = [fact("М-12", "Посредника убила «третья рука» (не сеть, не ОГПУ)"),
+              fact("М-14", "Первый подложный рапорт Степана (№6)"),
+              fact("М-15", "Штерн укрыл подлог Степана")]
+    assert realcanon._match_matrix_fact("Кто убил поляка-резидента («третья рука»)", matrix) is None  # 2 слова
+    assert realcanon._match_matrix_fact("Степан совершил подлог в рапорте", matrix) == "М-14"          # основы
+    assert realcanon._match_matrix_fact("Кто убил поляка (М-12)", matrix) == "М-12"                  # явная ссылка
+    assert realcanon._match_matrix_fact("Кто убил поляка (факт 15)", matrix) == "М-15"
 
 
 @real_only
