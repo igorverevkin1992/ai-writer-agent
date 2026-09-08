@@ -39,6 +39,9 @@
 {{ d.profile }}
 - Физика: {{ d.physique }}
 - Речевой паспорт: {{ d.speech }}
+{% if d.code -%}
+- Опознавательный код: {{ d.code }}
+{% endif -%}
 {% if d.relations -%}
 - Отношения: {% for k, v in d.relations | dictsort %}{{ k }} — {{ v }}{% if not loop.last %}; {% endif %}{% endfor %}
 {% endif %}

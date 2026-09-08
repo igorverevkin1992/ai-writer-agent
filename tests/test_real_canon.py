@@ -88,6 +88,34 @@ def test_матрица_закладки_тайны_досье(real):
     assert "Штерн" in lemm_d.relations and "на «Вы»" in lemm_d.speech
 
 
+def test_известные_имена_из_досье_и_участники_по_действию(real):
+    """Аудит 1.6/1.11: имена всех карточек досье известны; «Британец» и дубль «Куратор» — нет;
+    участник события — только участвующий в действии; Мередит приходит в гл. 41 из арки досье."""
+    known = exporter._known_names(LIBRARY)
+    assert {"Мередит", "Ковров", "Ремез", "Куратор ОГПУ", "Ольга"} <= known
+    assert "Британец" not in known and "Куратор" not in known
+    briefs = {b.chapter: b for b in exporter.load_briefs(real.exports)}
+    assert briefs[41].participants == ["Мередит"]
+    assert "Степан" not in briefs[46].participants          # «последний рапорт Степана на столе»
+    assert briefs[7].participants == ["Куратор ОГПУ"]      # «по спецу Лемму» — не участник
+    assert briefs[6].participants == []                     # «после ухода Степана»
+    assert briefs[44].participants == []                    # «нестыковка маршрута Лемма»
+    assert briefs[8].participants == ["Лемм"]               # «слежка за Леммом»; приказ куратора — до сцены
+    # участники по действию сохранены там, где событие — единственный источник (гл. 10–46)
+    assert briefs[10].participants == ["Заварзин"] and briefs[42].participants == ["Заварзин"]
+    assert briefs[25].participants == ["Степан"] and briefs[30].participants == ["Лемм"]
+    assert briefs[38].participants == ["Лемм"] and briefs[2].participants == ["Куратор ОГПУ", "Лемм"]
+    bans = {b.ban_id: b for b in exporter.load_infobans(real.exports) if b.secret}
+    assert "Куратор ОГПУ" in bans["Т-03"].known_by and "Куратор" not in bans["Т-03"].known_by
+    # досье Мередита с «Опознавательным кодом» — в окне гл. 41 (реплики-якоря финала т.2 вычищены)
+    w41 = compiler.compile_window(real, LIBRARY, 41)[0].read_text(encoding="utf-8")
+    sec = w41[w41.index("### Мередит"): w41.index("<!-- СЕКЦИЯ: что знает фокал")]
+    assert "Опознавательный код: 1. Перстень-печатка на левой руке. 2. Перчатка, снимаемая только с одной руки." in sec
+    assert "Ф-1927" not in sec and "кому служите" not in sec
+    w5 = compiler.compile_window(real, LIBRARY, 5)[0].read_text(encoding="utf-8")
+    assert "Опознавательный код" not in w5  # у карточек без секции строки нет
+
+
 def test_окно_главы_5_эквивалентно_эталону(real):
     """Критерий этапа 1: разделы эталона v1.1 присутствуют, тайны не утекают."""
     path, breakdown = compiler.compile_window(real, LIBRARY, 5)

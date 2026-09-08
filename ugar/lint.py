@@ -3,7 +3,8 @@
 Машинный слой — детерминированные проверки по выгрузкам и документам: хронология брифов,
 границы частей/актов, допустимость фокала, эпистемика брифов и принятой прозы (тайны,
 которых фокал не знает), реестр тайн ↔ матрица 3.1, диапазоны глав в матрице/закладках/
-континуити, возраст в досье, ссылки на неизвестные имена, круги истории, маркеры тайн.
+континуити, возраст в досье, ссылки на неизвестные имена, участники сцен без карточки досье и
+карточки без «Физики», круги истории, маркеры тайн.
 Каждая находка — файл, строка, объяснение; где правка механическая — предложение
 исправления (LintFix), которое автор применяет одним действием. Модельный слой
 (`run_lint_llm`) ищет смысловые противоречия, которые машине не видны.
@@ -350,6 +351,87 @@ def check_dossiers(library: Path, known_names: set[str], year: int | None, volum
                         code="ДОСЬЕ-2", severity="заметка", file=_rel(library, path), line=line,
                         message=f"ссылка [[{ref}]] — такого персонажа нет ни среди досье, ни среди известных имён",
                     ))
+            if not re.search(r"^##\s*Физик", body, re.M):
+                out.append(LintFinding(
+                    code="ДОСЬЕ-6", severity="заметка", file=_rel(library, path), line=offset + 1,
+                    message=f"{head.group(1).strip()}: у карточки нет секции «Физика»: Писатель обязан выдумать внешность",
+                ))
+    return out
+
+
+# роли безымянных персонажей сцен: основа → именительный падеж; такой участник события или сцены
+# не имеет карточки досье («поляк», «посредник», «оперативник ОГПУ»)
+_ROLES = {
+    "поляк": "поляк", "посредник": "посредник", "оперативник": "оперативник", "сторож": "сторож",
+    "милиционер": "милиционер", "посыльн": "посыльный", "писар": "писарь", "гастролёр": "гастролёр",
+    "медвежатник": "медвежатник", "куратор": "куратор", "чекист": "чекист", "следовател": "следователь",
+}
+_ROLE_RE = re.compile(r"(?<![а-яё])(" + "|".join(_ROLES) + r")([а-яё]*)(?![а-яё])", re.IGNORECASE)
+_ADJ_END_RE = re.compile(r"ск(ий|ая|ое|ие|ой|ую|ого|ому|им|их|ими|ом)$")  # «чекистской», «писарского» — прилагательные
+# «Веры Холодовой»: имя и фамилия подряд — персонаж, названный полностью
+_FULL_NAME_RE = re.compile(r"(?<![«\w])([А-ЯЁ][а-яё]+)\s+([А-ЯЁ][а-яё]+(?:ов|ев|ин|ын|ск)[а-яё]*)(?![а-яё])")
+_SCENE_SKIP = {"те же", "один", "одна", "все", "никого"}
+
+
+def check_scene_persons(briefs: list[Brief], dossier_names: set[str], known_names: set[str],
+                        reg_path: Path | None, p23_path: Path | None) -> list[LintFinding]:
+    """ПОГЛ-2: участники сцен и событий сетки без карточки досье — известные имена без карточки
+    («Куратор ОГПУ»), позиции поля «участники» сцены поглавника без известного имени («милиционер»,
+    «тело Клюева у сейфа»), роли безымянных персонажей и полные имена в событиях («поляк»,
+    «посредник», «Веры Холодовой»). Одна заметка на персонажа со списком глав (аудит 7.6, 3.10)."""
+    seen: dict[str, tuple[str, list[int], Path | None, str]] = {}
+
+    def note(key: str, who: str, chapter: int, path: Path | None, anchor: str) -> None:
+        key = key.lower()
+        if key not in seen:
+            seen[key] = (who, [chapter], path, anchor)
+        elif chapter not in seen[key][1]:
+            seen[key][1].append(chapter)
+
+    def has_card(name: str) -> bool:
+        return any(name.lower() == d.lower() or name.lower().startswith(d.lower() + " ") for d in dossier_names)
+
+    for b in briefs:
+        # событие сетки — первый бит брифа из реестра (в демо-формате биты — не события)
+        event = b.beats[0] if reg_path is not None and b.beats and not b.beats[0].lower().startswith("кладём") else ""
+        for name in [b.focal, *b.participants]:
+            if name and name in known_names and not has_card(name):
+                note(name, name, b.chapter, reg_path, event[:30])
+        texts = [(event, reg_path, event[:30])]
+        for scene in b.scenes:
+            parts = [x.strip() for x in scene.split("·")]
+            texts.append((scene, p23_path, scene[:30]))
+            if len(parts) > 1 and p23_path is not None:
+                for item in re.split(r"[,;]", re.sub(r"\(.*?\)", "", parts[1])):
+                    item = item.strip(" .")
+                    if not item or item.lower() in _SCENE_SKIP or realcanon.find_names(item, known_names):
+                        continue
+                    rm = _ROLE_RE.fullmatch(item)
+                    if rm:
+                        note(rm.group(1), _ROLES[rm.group(1).lower()], b.chapter, p23_path, scene[:30])
+                    else:
+                        note(item, item, b.chapter, p23_path, scene[:30])
+        for text, path, anchor in texts:
+            if not text:
+                continue
+            for m in _ROLE_RE.finditer(text):
+                stem = m.group(1).lower()
+                if _ADJ_END_RE.search(m.group(0).lower()) or any(n.lower().startswith(stem) for n in known_names):
+                    continue  # прилагательное («чекистской») или известное имя («куратор» = «Куратор ОГПУ»)
+                note(stem, _ROLES[stem], b.chapter, path, anchor)
+            for m in _FULL_NAME_RE.finditer(text):
+                prev = text[: m.start()].rstrip()
+                if not prev or prev[-1] in ".;:!?—·":
+                    continue  # начало фразы: «Смерть Дзержинского» — не «Имя Фамилия»
+                if not realcanon.find_names(m.group(0), known_names):
+                    note(m.group(2), m.group(0), b.chapter, path, anchor)
+    out: list[LintFinding] = []
+    for who, chapters, path, anchor in seen.values():
+        chs = ", ".join(str(c) for c in sorted(chapters))
+        out.append(LintFinding(
+            code="ПОГЛ-2", severity="заметка", file=_rel_or("", path), line=_find_line(path, anchor) if path else None,
+            message=f"участник сцены без досье: «{who}» (гл. {chs})",
+        ))
     return out
 
 
@@ -456,6 +538,8 @@ def run_lint(library: Path, exports_dir: Path, logs_dir: Path, export: bool = Tr
     findings += check_secrets_vs_matrix(infobans, matrix, exporter._registry(library))
     findings += check_chapter_refs(matrix, plants, continuity, briefs, library)
     findings += check_dossiers(library, known, year, volume)
+    findings += check_scene_persons(briefs, {d.name for d in dossiers}, known, exporter._registry(library),
+                                    next(iter(sorted(library.glob("23_*.md"))), None))
     findings += check_circles(circles, acts, briefs, library)
     findings += check_prose(library, briefs, infobans, stoplists)
     return _finish(findings, logs_dir, files=len(_library_docs(library)))

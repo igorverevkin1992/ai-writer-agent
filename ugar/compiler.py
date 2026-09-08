@@ -333,6 +333,7 @@ def safe_dossier(d, brief: Brief, infobans: list, participants: list[str]):
         "profile": _safe_sentences(d.profile, markers, brief.volume),
         "physique": _safe_sentences(d.physique, markers, brief.volume),
         "speech": _safe_sentences(d.speech, markers, brief.volume),
+        "code": _safe_sentences(d.code, markers, brief.volume),
         "relations": {k: v for k, v in relations.items() if v},
     })
 
