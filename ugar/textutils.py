@@ -31,8 +31,9 @@ _ABBR_MASK = "\x01"  # непечатаемый маркер точки внут
 _CONTEXT_MARK = "~"  # префикс в словаре: сокращение действует только перед цифрой/строчной буквой
 # одинокий заголовок внутри прозы: «Глава пятая», «Часть II», «Пролог» — без терминатора
 _HEADING_RE = re.compile(r"^(?:Глава|Часть|Пролог|Эпилог)\b[^.!?…]*$", re.IGNORECASE)
-# инициал: одиночная заглавная буква с точкой перед следующим словом с заглавной («А. К. Штерн»)
-_INITIAL_RE = re.compile(r"(?<![А-Яа-яЁёA-Za-z])([А-ЯЁA-Z])\.(?=\s*[А-ЯЁA-Z])")
+# инициал: одиночная заглавная буква с точкой («А. К. Штерн», «Лемм А. Х. подписал») — предложение
+# не заканчивается однобуквенным словом, поэтому такая точка границей не является
+_INITIAL_RE = re.compile(r"(?<![А-Яа-яЁёA-Za-z])([А-ЯЁA-Z])\.")
 
 
 def _load_abbreviations(extra_path: Path | None = None) -> list[tuple[str, bool]]:
@@ -58,7 +59,31 @@ def _mask_abbreviations(text: str, abbrs: list[tuple[str, bool]]) -> str:
         if contextual:
             pattern += r"(?=\s*[0-9а-яёa-z])"
         text = re.sub(pattern, abbr.replace(".", _ABBR_MASK), text)
+    # «т. е.», «и т. д.», «т. н.» с пробелом: точка внутри сокращения не завершает предложение
+    text = _SPACED_ABBR_RE.sub(lambda m: m.group(0).replace(".", _ABBR_MASK), text)
     return _INITIAL_RE.sub(lambda m: m.group(1) + _ABBR_MASK, text)
+
+
+# сокращения из двух частей с пробелом: «т. е.», «и т. д.», «и т. п.», «т. н.», «т. к.»
+_SPACED_ABBR_RE = re.compile(r"\b(?:и\s+)?т\.\s*[едпкн]\.", re.IGNORECASE)
+# абзац прямой речи: начинается с тире; атрибуция внутри — «, — сказал N» / «. — N»
+_SPEECH_ATTR_RE = re.compile(r"[,.!?…]\s*[—–-]\s+")
+
+
+def narration_only(text: str) -> str:
+    """Повествование и несобственно-прямая речь без реплик персонажей (03: стоп-лист линии
+    касается ВНУТРЕННЕЙ речи фокала). Абзац с тире: реплика отбрасывается до атрибуции
+    («— Сынок, — сказал Бугаев, и Штерн промолчал» → «и Штерн промолчал»); без атрибуции
+    абзац отбрасывается целиком. Эвристика описана в Д-1."""
+    kept: list[str] = []
+    for para in paragraphs(text):
+        if not para.lstrip().startswith(("—", "–", "-")):
+            kept.append(para)
+            continue
+        m = _SPEECH_ATTR_RE.search(para)
+        if m:
+            kept.append(para[m.end():].strip())
+    return "\n\n".join(k for k in kept if k)
 
 
 def paragraphs(text: str) -> list[str]:

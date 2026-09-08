@@ -169,8 +169,20 @@ def parse_norms_prose(path: Path) -> dict[str, Norm] | None:
     m = re.search(r"TTR\s*≥\s*([\d.,]+)\s*на окне\s*(\d+)\s*тыс", text)
     if not m:
         raise MarkupError(path, 1, "не найдена норма TTR")
-    norms["ttr_мин"] = Norm(min=float(m.group(1).replace(",", ".")), unit="доля", source=src)
+    brak_ttr = re.search(r"переводной уровень\s*([\d.,]+)\s*=\s*брак", text)
+    norms["ttr_мин"] = Norm(
+        min=float(m.group(1).replace(",", ".")),
+        brak=float(brak_ttr.group(1).replace(",", ".")) if brak_ttr else None,
+        unit="доля", source=src,
+    )
     norms["ttr_окно_слов"] = Norm(min=float(m.group(2)) * 1000, max=float(m.group(2)) * 1000, unit="слов", source=src)
+
+    m2 = re.search(r"диалог\s*~?\s*(\d+)\s*[–-]\s*(\d+)\s*%", text)
+    if m2:  # «диалог ~15–20 % строк»
+        norms["доля_диалога"] = Norm(min=int(m2.group(1)) / 100, max=int(m2.group(2)) / 100, unit="доля строк", source=src)
+    m2 = re.search(r"[Аа]бзац\s*—\s*как правило,\s*(\d+)\s*[–-]\s*(\d+)\s*фраз", text)
+    if m2:  # «Абзац — как правило, 2–5 фраз; однострочный абзац — приём, не норма»
+        norms["фраз_в_абзаце"] = Norm(min=float(m2.group(1)), max=float(m2.group(2)), unit="фраз", source=src)
 
     m = re.search(r"объём главы\s*[—-]+\s*(\d+)\s*[–-]\s*(\d+)\s*слов", text)
     if m:  # необязательная норма (Р-019)

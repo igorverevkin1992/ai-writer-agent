@@ -305,10 +305,14 @@ def analyze(
         )
 
     # FR-V1.5 — запрещённая лексика (год главы и фокал)
+    narration = textutils.narration_only(text)
     for rule in stoplists:
         if rule.kind != "лексика" or not _stoplist_applies(rule, brief):
             continue
-        found = _find_items(text, rule.items)
+        # стоп-лист линии фокала (0.3) касается ВНУТРЕННЕЙ речи: реплики других персонажей
+        # («— Сынок, — сказал Бугаев») ложным флагом быть не должны. Лексика эпохи (0.4) — весь текст.
+        scope_text = narration if rule.scope == "0.3" else text
+        found = _find_items(scope_text, rule.items)
         if found:
             checks.append(
                 CheckResult(
@@ -318,6 +322,7 @@ def analyze(
                     actual="; ".join(found),
                     quotes=_quote_sentences(sentences, {w.lower().replace("ё", "е") for w in found}),
                     rule_source=f"{rule.rule_id} (реестр {rule.scope})",
+                    note="проверьте значение: прямое значение эпохи допустимо" if rule.action == "флаг" else "",
                 )
             )
     if not any(c.check_id == "V1.5_стоп_лексика" for c in checks):
@@ -389,7 +394,9 @@ def analyze(
     part_tokens: list[str] = []
     scope_files: list[str] = []
     if corpus_dir is not None and corpus_dir.exists():
-        for f in corpus_scope(corpus_dir, brief.volume, part_range):
+        # окно скользит по ТОМУ: часть тома 1 (10 × 800 слов) короче окна 10 000, и проверка
+        # лексической бедности не срабатывала бы никогда (аудит 2, находка 2.2)
+        for f in corpus_scope(corpus_dir, brief.volume, None):
             if own_stem and f.stem == own_stem:
                 continue
             scope_files.append(f.stem)
@@ -397,20 +404,55 @@ def analyze(
     part_tokens.extend(tokens)
     rolling = textutils.rolling_ttr(part_tokens, win_size)
     min_ttr = min((v for _, v in rolling), default=None)
+    short_corpus = min_ttr is None and part_tokens
+    if short_corpus:  # тома пока меньше окна — считаем по имеющемуся объёму, справочно
+        uniq = len(set(part_tokens))
+        min_ttr = round(uniq / len(part_tokens), 3)
     ttr_norm = norms["ttr_мин"]
-    scope_note = f"том {brief.volume}" + (f", гл. {part_range[0]}–{part_range[1]}" if part_range else "")
     checks.append(
         CheckResult(
             check_id="V1.8b_ttr_окно",
             status=(
-                "FLAG" if min_ttr is not None and ttr_norm.min is not None and min_ttr < ttr_norm.min else "PASS"
+                "PASS" if short_corpus or min_ttr is None or ttr_norm.min is None
+                else "BRAK" if ttr_norm.brak is not None and min_ttr < ttr_norm.brak
+                else "FLAG" if min_ttr < ttr_norm.min else "PASS"
             ),
-            threshold=f"мин {ttr_norm.min:g} в окне {win_size} слов",
-            actual=f"{min_ttr:.3f}" if min_ttr is not None else f"часть короче {win_size} слов — не считается",
+            threshold=f"мин {ttr_norm.min:g}" + (f", брак {ttr_norm.brak:g}" if ttr_norm.brak else "")
+                      + f" в окне {win_size} слов",
+            actual=(f"{min_ttr:.3f}" if min_ttr is not None else "корпус пуст")
+                   + (f" (справочно: том короче окна, {len(part_tokens)} слов)" if short_corpus else ""),
             rule_source=ttr_norm.source,
-            note=f"корпус: {scope_note}" + (f" ({', '.join(scope_files)})" if scope_files else " (корпус пуст)"),
+            note=f"корпус: том {brief.volume}" + (f" ({', '.join(scope_files)})" if scope_files else " (корпус пуст)"),
         )
     )
+
+    # FR-V1.9 — доля диалога и однострочные абзацы (02 §5): нормы справочные, порог — из канона
+    paras = [p for p in textutils.paragraphs(text) if p.strip()]
+    if paras:
+        dialogue = sum(1 for p in paras if p.lstrip().startswith(("—", "–")))
+        if "доля_диалога" in norms:
+            add("V1.9a_доля_диалога", "доля_диалога", round(dialogue / len(paras), 3),
+                note=f"{dialogue} реплик-абзацев из {len(paras)}")
+        if "фраз_в_абзаце" in norms:
+            per_para = [len([s for s in textutils.split_sentences(p, extra_abbr) if textutils.words(s)]) for p in paras]
+            single = sum(1 for n in per_para if n <= 1)
+            add("V1.9b_фраз_в_абзаце", "фраз_в_абзаце",
+                round(sum(per_para) / len(per_para), 2),
+                note=f"однострочных абзацев: {single} из {len(paras)} (Р-015: приём, не норма)")
+
+    # FR-V1.10 — документ-вставка, назначенная брифом, обязана быть оформлена маркерами
+    if brief.documents:
+        has_block = "→ ДОКУМЕНТ" in raw and "← КОНЕЦ ДОКУМЕНТА" in raw
+        checks.append(
+            CheckResult(
+                check_id="V1.11_документ_вставка",
+                status="PASS" if has_block else "BRAK",
+                threshold="блок `→ ДОКУМЕНТ` … `← КОНЕЦ ДОКУМЕНТА`",
+                actual="есть" if has_block else "нет",
+                rule_source="бриф главы (реестр §6)",
+                note="; ".join(brief.documents)[:200],
+            )
+        )
 
     return checks
 

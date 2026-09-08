@@ -358,7 +358,10 @@ def test_континуити_и_отношения_реального_кано�
     shutil.copyfile(LIBRARY / "Проза/Том1_Глава05.md", real.draft_path(5, 1))
     compiler.compile_window(real, LIBRARY, 5)
     ttr = next(c for c in verifier1.run_verify1(real, 5, 1).checks if c.check_id == "V1.8b_ttr_окно")
-    assert "том 1, гл. 1–9" in ttr.note and "Том1_Глава05" not in ttr.note  # часть I, без самой главы
+    # окно TTR скользит по всему тому (часть короче 10 000 слов — проверка не срабатывала бы никогда),
+    # сама проверяемая глава в корпус не входит
+    assert "том 1" in ttr.note and "Том1_Глава05" not in ttr.note
+    assert "справочно: том короче окна" in ttr.actual and ttr.status == "PASS"
 
 
 # ---------------------------------------- аудит 2, 1.1: §5 дозы и §6 документы — синтетика и демо

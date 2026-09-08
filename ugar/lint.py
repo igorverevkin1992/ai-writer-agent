@@ -464,6 +464,37 @@ def check_circles(circles, acts, briefs: list[Brief], library: Path) -> list[Lin
     return out
 
 
+def check_accepted_prose(library: Path, exports_dir: Path, briefs: list[Brief]) -> list[LintFinding]:
+    """ПРОЗА-3: принятая в канон глава не проходит Э1 по текущим нормам 02 §5.
+
+    Такое расхождение — не ошибка конвейера, а противоречие внутри канона (Р-015 задал коридор,
+    Р-018 принял главу вне коридора). Решение — за автором: перекалибровать нормы или править главу."""
+    out: list[LintFinding] = []
+    norms = exporter.load_norms(exports_dir)
+    stoplists = exporter.load_stoplists(exports_dir)
+    by_ch = {b.chapter: b for b in briefs}
+    for path in sorted((library / "Проза").glob("*.md")) if (library / "Проза").exists() else []:
+        m = re.search(r"Глава(\d+)", path.name)
+        if not m or "МАКЕТ" in path.name:
+            continue
+        brief = by_ch.get(int(m.group(1)))
+        if brief is None:
+            continue
+        try:
+            checks = verifier1.analyze(path.read_text(encoding="utf-8"), "", brief, norms, stoplists)
+        except (KeyError, ValueError):
+            continue  # нормы неполны — это ловит РАЗМ-1/ЛИНТ-0
+        brak = [c for c in checks if c.status == "BRAK"]
+        if brak:
+            details = "; ".join(f"{c.check_id} = {c.actual} при пороге {c.threshold}" for c in brak)
+            out.append(LintFinding(
+                code="ПРОЗА-3", severity="предупреждение", file=_rel(library, path),
+                message=f"принятая глава {brief.chapter} не проходит Э1 по текущим нормам: {details}. "
+                        "Либо нормы 02 §5 перекалибровать по принятой прозе, либо главу править — решение автора",
+            ))
+    return out
+
+
 def check_prose(library: Path, briefs: list[Brief], infobans: list[InfoBan], stoplists) -> list[LintFinding]:
     """Принятая проза: маркеры тайн, которых фокал главы не знает; стоп-лексика линии фокала."""
     out: list[LintFinding] = []
@@ -542,6 +573,7 @@ def run_lint(library: Path, exports_dir: Path, logs_dir: Path, export: bool = Tr
                                     next(iter(sorted(library.glob("23_*.md"))), None))
     findings += check_circles(circles, acts, briefs, library)
     findings += check_prose(library, briefs, infobans, stoplists)
+    findings += check_accepted_prose(library, exports_dir, briefs)
     return _finish(findings, logs_dir, files=len(_library_docs(library)))
 
 
