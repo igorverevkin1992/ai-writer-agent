@@ -23,7 +23,8 @@ from pathlib import Path
 from . import mdparse
 from .mdparse import MarkupError, cell
 from .schemas import (
-    Act, Brief, CircleStep, ContinuityEvent, DocumentSpec, Dose, Dossier, InfoBan, MatrixFact, Norm, Plant, Scene,
+    Act, Brief, ChronicleEvent, CircleStep, ContinuityEvent, DocumentSpec, Dose, Dossier, InfoBan, MatrixFact,
+    Norm, Plant, Scene,
     StopRule, StoryCircle,
 )
 
@@ -238,6 +239,68 @@ def parse_focal_stoplists(path: Path) -> list[StopRule]:
                     )
                 )
     return rules
+
+
+def parse_line_prose_bans(path: Path) -> list[StopRule]:
+    """«Персональные запреты линий» 03 фразами, а не словами: «канцелярит — панцирь страха»,
+    «сентимент запрещён», «Степан не подозревает Штерна». Э2 без них не может проверить 4.1
+    (лексический стоп-лист даёт только слова)."""
+    sec = mdparse.find_section(mdparse.parse_sections(path), r"[Пп]ерсональные запреты")
+    if sec is None:
+        return []
+    rules: list[StopRule] = []
+    focal = ""
+    items: list[str] = []
+
+    def flush() -> None:
+        if focal and items:
+            rules.append(StopRule(scope="0.3", rule_id=f"0.3-проза-{focal}", items=list(items),
+                                  applies_to={"focal": focal}, action="запрет", kind="проза"))
+    for line in sec.body.splitlines():
+        header = re.match(r"\*\*([А-ЯЁ][а-яё]+)", line.strip())
+        if header:
+            flush()
+            focal, items = header.group(1), []
+            continue
+        text = line.strip()
+        if not text.startswith("- ") or "стоп-лист" in text.lower():
+            continue  # лексический стоп-лист разбирается отдельно (parse_stoplists)
+        items.append(re.sub(r"\s+", " ", text[2:]).strip())
+    flush()
+    return rules
+
+
+CHRONICLE_MONTHS = {
+    "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "мая": 5, "май": 5, "июн": 6, "июл": 7,
+    "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+}
+
+
+def _chronicle_month(date: str) -> int | None:
+    m = re.search(r"\b\d{1,2}\.(\d{2})\b", date)
+    if m:
+        return int(m.group(1))
+    low = date.lower()
+    for stem, num in CHRONICLE_MONTHS.items():
+        if stem in low:
+            return num
+    return None
+
+
+def parse_chronicle(path: Path) -> list[ChronicleEvent]:
+    """Историческая хроника 17: таблицы «Дата | Событие | Статус» (чек-лист 4.2, анахронизмы)."""
+    out: list[ChronicleEvent] = []
+    for table in mdparse.parse_tables(path):
+        if "Дата" not in table.headers or "Событие" not in table.headers:
+            continue
+        for row in table.rows:
+            date = cell(row, "Дата")
+            event = cell(row, "Событие")
+            if not date or not event:
+                continue
+            status = cell(row, "Статус") or "✓"
+            out.append(ChronicleEvent(date=date, event=event, status=status, month=_chronicle_month(date)))
+    return out
 
 
 def _clean_item(item: str) -> list[str]:

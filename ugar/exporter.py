@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from . import guard, mdparse, realcanon, textutils
 from .mdparse import MarkupError, cell, parse_number
 from .schemas import (
+    ChronicleEvent,
     Brief,
     ContinuityEvent,
     DocumentSpec,
@@ -137,6 +138,8 @@ def export_stoplists(library: Path) -> list[StopRule]:
     except MarkupError:
         rules.extend(realcanon.parse_focal_stoplists(p03))  # «Персональные запреты линий»
         rows03 = []
+    # запреты линий фразами («канцелярит — панцирь страха», «сентимент запрещён») — для Э2 (4.1)
+    rules.extend(realcanon.parse_line_prose_bans(p03))
     for row in rows03:
         rules.append(
             StopRule(
@@ -519,6 +522,7 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, st
         "acts.json": export_acts(library),
         "doses.json": export_doses(library),
         "documents.json": export_documents(library),
+        "chronicle.json": export_chronicle(library),
     }
     hashes: dict[str, str] = {}
     for name, data in parsed.items():
@@ -556,6 +560,20 @@ def load_export(exports_dir: Path, name: str):
 
 def load_norms(exports_dir: Path) -> dict[str, Norm]:
     return {k: Norm.model_validate(v) for k, v in load_export(exports_dir, "norms.json").items()}
+
+
+def export_chronicle(library: Path) -> list:
+    """Историческая хроника 17 (анахронизмы, 4.2). Документа может не быть (демо) — пустой список."""
+    for path in sorted(library.glob("17_*.md")):
+        return realcanon.parse_chronicle(path)
+    return []
+
+
+def load_chronicle(exports_dir: Path) -> list[ChronicleEvent]:
+    try:
+        return [ChronicleEvent.model_validate(r) for r in load_export(exports_dir, "chronicle.json")]
+    except FileNotFoundError:
+        return []
 
 
 def load_stoplists(exports_dir: Path) -> list[StopRule]:

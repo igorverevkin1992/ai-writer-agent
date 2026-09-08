@@ -82,7 +82,7 @@ def test_окно_и_э2_с_каркасом(ws, library):
     system, user = verifier2.build_prompt(ws, 1, 1)
     assert "## Драматургия: каркас круга истории" in user and "Слабое место (по оценке аналитика): шаг 6" not in user
     assert "Том: шаг 1 «Ты»" in user
-    assert "6. Драматургия" in system and "драматургия" in system
+    assert "8. **Драматургия**" in system and "драматургия" in system
 
 
 def _init_git(lib):

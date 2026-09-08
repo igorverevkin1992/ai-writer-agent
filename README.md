@@ -84,7 +84,7 @@ ugar export         # MD-библиотека → exports/*.json (FR-X1…X3)
 ugar compile 7      # окно контекста по шаблону v1.1 (FR-C1…C6)
 ugar write 7        # Писатель → chapters/007/draft_1.md (FR-W1)
 ugar verify1 7      # Э1: формальные проверки; брак → авто-повтор ≤2 (FR-V1.*)
-ugar verify2 7      # Э2: смысловые проверки Claude → flags.json (FR-V2.*)
+ugar verify2 7      # Э2: смысловые проверки Claude → flags.json (FR-V2.*); --вкус — советы по 02 §6.1
 ugar review 7       # пакет приёмки: review.md, edits.md, resolutions.json (FR-E1)
 ugar apply-edits 7  # Писатель вносит правки точно (FR-W2, FR-E3)
 ugar diff-check 7   # дифф-контроль: внесено / не внесено / самоволия (FR-V1.10)

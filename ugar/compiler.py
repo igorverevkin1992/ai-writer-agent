@@ -164,7 +164,7 @@ def _line_rules(stoplists: list[StopRule], participants: list[str], year: int | 
     """Правила линий только участников сцены + лексика года главы (FR-C1, FR-V1.5)."""
     result = []
     for rule in sorted(stoplists, key=lambda r: (r.scope, r.rule_id)):
-        if rule.kind == "усилитель":
+        if rule.kind != "лексика":  # усилители и прозаические запреты линий выводятся отдельно
             continue
         applies = rule.applies_to
         if "focal" in applies and applies["focal"] not in participants:

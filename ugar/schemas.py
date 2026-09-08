@@ -21,7 +21,16 @@ class StopRule(BaseModel):
     items: list[str]
     applies_to: dict = Field(default_factory=dict)  # {focal?|year?|all}
     action: Literal["запрет", "флаг"] = "запрет"
-    kind: Literal["лексика", "усилитель"] = "лексика"
+    kind: Literal["лексика", "усилитель", "проза"] = "лексика"  # «проза» — запреты линий 03 фразами, не словами
+
+
+class ChronicleEvent(BaseModel):
+    """Строка chronicle.json — историческая хроника 17 (анахронизмы, чек-лист 4.2)."""
+
+    date: str
+    event: str
+    status: str = "✓"        # ✓ подтверждено, ⚠ требует проверки (Конституция: опираться только на ✓)
+    month: int | None = None  # для среза «месяц главы ± 1»
 
 
 class MatrixFact(BaseModel):

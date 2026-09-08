@@ -62,6 +62,12 @@ def build_review_pack(ws: Workspace, chapter: int, draft: int) -> Path:
             lines.append(f"  > {f.quote}")
     else:
         lines.append("- нет")
+    taste = verifier2.load_taste(ws, chapter)
+    if taste:
+        lines += ["", "## Вкус (советы, не блокируют приёмку; 02 §6.1)", ""]
+        for f in taste:
+            lines.append(f"- **{f.flag_id}** — {f.rule}; {f.recommendation}")
+            lines.append(f"  > {f.quote}")
     lines += ["", "---", "", "## ТЕКСТ", "", text]
     guard.write_text(chdir / "review.md", "\n".join(lines) + "\n")
 

@@ -213,6 +213,7 @@ def cmd_verify1(chapter: int) -> None:
 def cmd_verify2(
     chapter: int,
     manual: bool = typer.Option(False, "--manual", help="Принять flags.json, заполненный вручную (NFR-3)."),
+    taste: bool = typer.Option(False, "--вкус", "--taste", help="Дополнительно: советы по вкусу автора (02 §6.1) — не блокируют приёмку."),
 ) -> None:
     """Смысловые проверки Э2 (FR-V2.*)."""
     ws, cfg, lib = _ctx()
@@ -240,6 +241,14 @@ def cmd_verify2(
     st.transition("верифицировано-2", "verify2")
     sam = sum(1 for f in flags if f.kind == "samovolka")
     typer.secho(f"Э2 завершён: {len(flags)} флагов, из них самоволок: {sam}.", fg=typer.colors.GREEN)
+    if taste:
+        try:
+            advice = verifier2.run_taste(ws, cfg, chapter, st.draft)
+            typer.echo(f"Вкус (совещательно, 02 §6.1): замечаний {len(advice)} → chapters/{chapter:03d}/taste.json")
+        except adapters.ManualModeNeeded:
+            typer.echo(f"Промпт вкуса сохранён: chapters/{chapter:03d}/taste_prompt.md (ответ — в taste.json).")
+        except ValueError as e:
+            typer.secho(f"⚠ Вкус: {e}", fg=typer.colors.YELLOW)
 
 
 @app.command("review", rich_help_panel="Такт главы")
