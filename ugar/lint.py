@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from . import adapters, exporter, guard, llmjson, realcanon, verifier1
+from . import adapters, exporter, guard, llmjson, realcanon, textutils, verifier1
 from .config import Config
 from .mdparse import MarkupError
 from .paths import Workspace
@@ -45,14 +45,46 @@ def _rel(library: Path, path: Path) -> str:
         return str(path)
 
 
+def marker_hit(text: str, markers: list[str]) -> str | None:
+    """Маркер тайны в тексте по границам слова и основе (как стоп-лексика Э1), а не подстрокой:
+    «сынок» ≠ «сын», «активно» ≠ «актив» (аудит 2, находка 3.9). Обороты из нескольких слов —
+    дословно. Возвращает найденный маркер или None."""
+    low = text.lower().replace("ё", "е")
+    for m in markers:
+        if not m:
+            continue
+        if verifier1.item_pattern(m).search(low):
+            return m
+    return None
+
+
+_LINES_CACHE: dict[tuple[Path, int], list[str]] = {}
+
+
+def _lines_cache(path: Path) -> list[str]:
+    """Строки документа: линтер обращается к одному файлу десятки раз (находки, _find_line).
+    Ключ включает время изменения — наблюдатель перепроверяет канон после правок, и устаревший
+    кэш давал бы находки по старому содержимому."""
+    try:
+        key = (path, path.stat().st_mtime_ns)
+    except OSError:
+        return []
+    if key not in _LINES_CACHE:
+        try:
+            _LINES_CACHE[key] = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            _LINES_CACHE[key] = []
+        if len(_LINES_CACHE) > 500:  # прогон линтера — десятки документов; страховка от роста
+            for old_key in list(_LINES_CACHE)[:250]:
+                _LINES_CACHE.pop(old_key, None)
+    return _LINES_CACHE[key]
+
+
 def _find_line(path: Path, needle: str, start: int = 0) -> int | None:
     """Номер строки (1-based) первого вхождения фрагмента в файле."""
     if not needle:
         return None
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
+    lines = _lines_cache(path)
     for i, line in enumerate(lines[start:], start=start + 1):
         if needle in line:
             return i
@@ -211,11 +243,13 @@ def check_brief_epistemics(briefs: list[Brief], infobans: list[InfoBan], reg_pat
     """Бриф главы описывает событие словами тайны, которой фокал в этой главе ещё не знает."""
     out: list[LintFinding] = []
     for b in briefs:
-        text = " ".join([*b.scenes, *b.beats]).lower()
+        text = " ".join([*b.scenes, *b.beats])
+        # реплики персонажей в брифе («Бугаев: «молодец, сынок»») — не знание фокала
+        text = textutils.narration_only(text) or text
         for ban in infobans:
             if not ban.secret or ban.known_to(b.focal, b.chapter) or not ban.markers:
                 continue
-            hit = next((m for m in ban.markers if m.lower() in text), None)
+            hit = marker_hit(text, ban.markers)
             if hit:
                 out.append(LintFinding(
                     code="ЭПИСТ-1", severity="предупреждение", file=_rel_or("", reg_path),
@@ -506,13 +540,17 @@ def check_prose(library: Path, briefs: list[Brief], infobans: list[InfoBan], sto
         b = by_ch.get(int(m.group(1)))
         if not b:
             continue
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = _lines_cache(path)
         active = [ban for ban in infobans if ban.secret and ban.markers and not ban.known_to(b.focal, b.chapter)]
         rules = [r for r in stoplists if r.kind == "лексика" and verifier1._stoplist_applies(r, b)]
+        # маркеры тайн и стоп-лексика линии — по внутренней речи фокала: реплика чужого персонажа
+        # («— Сынок, — сказал Бугаев») знанием фокала не является (03, аудит 2, находка 3.9)
+        narration = set(textutils.narration_only("\n\n".join(lines)).splitlines())
         for i, line in enumerate(lines, start=1):
-            low = line.lower()
+            if line.strip() and line.strip() not in narration:
+                continue
             for ban in active:
-                hit = next((mk for mk in ban.markers if mk.lower() in low), None)
+                hit = marker_hit(line, ban.markers)
                 if hit:
                     out.append(LintFinding(
                         code="ПРОЗА-1", severity="предупреждение", file=_rel(library, path), line=i,

@@ -125,3 +125,39 @@ def test_линтер_подсвечивает_принятую_главу_вн�
     assert f is not None and "Глава05" in f.file and f.severity == "предупреждение"
     assert "V1.2a_средняя_длина" in f.message and "решение автора" in f.message
     assert report.errors == 0
+
+
+# ------------------------------------------------------------- точность маркеров линтера (п. 18)
+
+
+def test_маркеры_тайн_по_границам_слова():
+    """«сынок» ≠ «сын», «активно» ≠ «актив» (аудит 2, находка 3.9); оборот — дословно."""
+    assert lint.marker_hit("Бугаев сказал: молодец, сынок", ["сын"]) is None
+    assert lint.marker_hit("работа активно продолжается", ["актив"]) is None
+    assert lint.marker_hit("его сын пропал", ["сын"]) == "сын"
+    assert lint.marker_hit("говорили о сыне", ["сын"]) == "сын"          # косвенный падеж — ловится
+    assert lint.marker_hit("завербован сетью в подворотне", ["завербован сетью"]) == "завербован сетью"
+    assert lint.marker_hit("сеть работала", ["завербован сетью"]) is None
+
+
+def test_маркер_в_реплике_чужого_персонажа_не_знание_фокала(ws, library, tmp_path):
+    """Проза: «— Сынок, — сказал Бугаев» — не утечка тайны фокала; то же в повествовании — утечка."""
+    import shutil
+
+    from ugar.schemas import InfoBan
+
+    lib = tmp_path / "копия_библиотеки"
+    shutil.copytree(library, lib)
+    (lib / "Проза").mkdir(exist_ok=True)
+    brief = exporter.load_brief(ws.exports, 1)
+    bans = [InfoBan(ban_id="Т-99", text="тайна", secret=True, markers=["сын"], known_by={}, until_chapter=40)]
+    stops = exporter.load_stoplists(ws.exports)
+
+    (lib / "Проза" / f"Том1_Глава0{brief.chapter}.md").write_text(
+        "Он вошёл в контору.\n\n— Сынок, — сказал Бугаев и отвернулся.\n\nКаширин молчал.\n", encoding="utf-8")
+    assert [f for f in lint.check_prose(lib, [brief], bans, stops) if f.code == "ПРОЗА-1"] == []
+
+    (lib / "Проза" / f"Том1_Глава0{brief.chapter}.md").write_text(
+        "Он вошёл в контору.\n\nКаширин вспомнил про сына и промолчал.\n", encoding="utf-8")
+    hits = [f for f in lint.check_prose(lib, [brief], bans, stops) if f.code == "ПРОЗА-1"]
+    assert len(hits) == 1 and "Т-99" in hits[0].message
