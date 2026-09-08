@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { apiGet, apiPost } from "./api";
 import type { Notify, RunCommand } from "./App";
 import type { Confirm } from "./Confirm";
+import { DirtyContext, readDraft, RestoredNote, useDirtyKeys, useDraft } from "./drafts";
 import { highlight, type Mark } from "./highlight";
 import { usePending } from "./hooks";
 import type { ChapterDetail, Flag, Job, Resolution } from "./types";
@@ -45,6 +46,12 @@ const MACHINE_STATES = new Set([
   "не-начато", "собрано", "сгенерировано", "верифицировано-1", "верифицировано-2", "правки",
 ]);
 
+type Tab = "чтение" | "правки" | "приёмка" | "ручной" | "история";
+const TABS: readonly Tab[] = ["чтение", "правки", "приёмка", "ручной", "история"];
+const TAB_LABEL: Record<Tab, string> = {
+  чтение: "Чтение с флагами", правки: "Правки", приёмка: "Приёмка", ручной: "Окно / ручной режим", история: "История",
+};
+
 export function ChapterView(props: {
   chapter: number;
   job: Job | null;
@@ -55,8 +62,28 @@ export function ChapterView(props: {
 }) {
   const { chapter, job, refreshTick, runCommand, notify, confirm } = props;
   const [d, setD] = useState<ChapterDetail | null>(null);
-  const [tab, setTab] = useState<"чтение" | "правки" | "приёмка" | "ручной" | "история">("чтение");
+  const [tab, setTab] = useState<Tab>("чтение");
   const [pending, run] = usePending();
+  // несохранённый текст во вкладках (аудит 5.3): смена вкладки — с подтверждением,
+  // черновики в localStorage помечаются точкой на вкладке
+  const dirtyRegistry = useContext(DirtyContext);
+  const dirtyPrefix = `глава:${chapter}:`;
+  const dirtyKeys = useDirtyKeys(dirtyPrefix);
+  const draftTabs = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of TABS) if (readDraft(`${dirtyPrefix}${t}`)) set.add(t);
+    for (const k of dirtyKeys) set.add(k.slice(dirtyPrefix.length));
+    return set;
+  }, [dirtyPrefix, dirtyKeys]);
+
+  const switchTab = (t: Tab) =>
+    run(async () => {
+      if (t === tab) return;
+      const q = dirtyRegistry.question(dirtyPrefix);
+      if (q && !(await confirm(q))) return;
+      if (q) dirtyRegistry.leave(dirtyPrefix);
+      setTab(t);
+    });
 
   const load = useCallback(() => {
     apiGet<ChapterDetail>(`/api/chapter/${chapter}`).then(setD).catch((e) => notify(String(e)));
@@ -141,10 +168,11 @@ export function ChapterView(props: {
       {job && (job.chapter === chapter || job.chapter == null) && <JobBox job={job} />}
 
       <div className="tabs" role="tablist">
-        {(["чтение", "правки", "приёмка", "ручной", "история"] as const).map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
-            {t === "чтение" ? "Чтение с флагами" : t === "правки" ? "Правки" : t === "приёмка" ? "Приёмка"
-              : t === "ручной" ? "Окно / ручной режим" : "История"}
+        {TABS.map((t) => (
+          <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : ""} onClick={() => switchTab(t)}
+            title={draftTabs.has(t) ? "есть несохранённый текст" : undefined}>
+            {TAB_LABEL[t]}
+            {draftTabs.has(t) && <span className="tab-dot" aria-label="не сохранено">●</span>}
           </button>
         ))}
       </div>
@@ -303,19 +331,22 @@ function FlagCard(props: {
 
 // ------------------------------------------------------------------- Правки
 
+const EDITS_TEMPLATE = "БЫЛО: \nСТАЛО: \n\nУКАЗАНИЕ: \n";
+
 function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; notify: Notify }) {
-  const [text, setText] = useState(d.edits_md ?? "БЫЛО: \nСТАЛО: \n\nУКАЗАНИЕ: \n");
+  // черновик edits.md переживает перезагрузку и смену вида (аудит 5.3)
+  const ds = useDraft(`глава:${d.chapter}:правки`, d.edits_md ?? EDITS_TEMPLATE, `во вкладке «Правки» главы ${d.chapter}`);
+  const text = ds.text;
   const [k1, setK1] = useState<number | null>(null);
   const [k2, setK2] = useState<number | null>(null);
   const [diff, setDiff] = useState<string[] | null>(null);
   const [pending, run] = usePending();
 
-  useEffect(() => setText(d.edits_md ?? "БЫЛО: \nСТАЛО: \n\nУКАЗАНИЕ: \n"), [d.edits_md]);
-
   const save = () =>
     run(async () => {
       try {
         const r = await apiPost<{ parsed: number }>(`/api/chapter/${d.chapter}/edits`, { text });
+        ds.clear();
         notify(`Сохранено: распознано правок — ${r.parsed}`, "ok");
         reload();
       } catch (e) {
@@ -338,10 +369,12 @@ function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; no
 
   return (
     <>
-      <h2>edits.md — пары «БЫЛО/СТАЛО» и строки «УКАЗАНИЕ:»</h2>
-      <textarea aria-label="edits.md" value={text} onChange={(e) => setText(e.target.value)} />
+      <h2>edits.md — пары «БЫЛО/СТАЛО» и строки «УКАЗАНИЕ:»{ds.dirty && <span className="tab-dot"> · не сохранено</span>}</h2>
+      <RestoredNote state={ds} />
+      <textarea aria-label="edits.md" value={text} onChange={(e) => ds.setText(e.target.value)} />
       <div className="actions">
-        <button className="primary" disabled={pending} onClick={save}>Сохранить правки</button>
+        <button className="primary" disabled={pending || !ds.dirty} onClick={save}>Сохранить правки</button>
+        {ds.dirty && <button disabled={pending} onClick={ds.discard}>Отменить правки</button>}
       </div>
 
       {d.edits_parsed.length > 0 && (
@@ -393,14 +426,17 @@ function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; no
 
 function Acceptance(props: { d: ChapterDetail; reload: () => void; notify: Notify; unresolved: number }) {
   const { d, reload, notify, unresolved } = props;
-  const [batch, setBatch] = useState(d.canon_batch ?? "");
+  // пакет канониста: черновик в localStorage, пока пакет существует (аудит 5.3)
+  const ds = useDraft(d.canon_batch != null ? `глава:${d.chapter}:приёмка` : null, d.canon_batch ?? "",
+    `во вкладке «Приёмка» главы ${d.chapter}`);
+  const batch = ds.text;
   const [pending, run] = usePending();
-  useEffect(() => setBatch(d.canon_batch ?? ""), [d.canon_batch]);
 
   const saveBatch = () =>
     run(async () => {
       try {
         await apiPost(`/api/chapter/${d.chapter}/canon-batch`, { text: batch });
+        ds.clear();
         notify("Пакет сохранён.", "ok");
         reload();
       } catch (e) {
@@ -438,13 +474,15 @@ function Acceptance(props: { d: ChapterDetail; reload: () => void; notify: Notif
         <p className="unresolved">Самоволок без решения: {unresolved} — вкладка «Чтение с флагами».</p>
       )}
 
-      <h2>Пакет записей в канон (canon_batch.md)</h2>
+      <h2>Пакет записей в канон (canon_batch.md){ds.dirty && <span className="tab-dot"> · не сохранено</span>}</h2>
       {d.canon_batch != null ? (
         <>
           <p className="muted">Удалите строки, которые не принимаете, и сохраните — затем «Применить пакет + коммит».</p>
-          <textarea aria-label="canon_batch.md" style={{ minHeight: 260 }} value={batch} onChange={(e) => setBatch(e.target.value)} />
+          <RestoredNote state={ds} />
+          <textarea aria-label="canon_batch.md" style={{ minHeight: 260 }} value={batch} onChange={(e) => ds.setText(e.target.value)} />
           <div className="actions">
-            <button className="primary" disabled={pending} onClick={saveBatch}>Сохранить пакет</button>
+            <button className="primary" disabled={pending || !ds.dirty} onClick={saveBatch}>Сохранить пакет</button>
+            {ds.dirty && <button disabled={pending} onClick={ds.discard}>Отменить правки</button>}
           </div>
         </>
       ) : (
@@ -483,7 +521,10 @@ function History({ d }: { d: ChapterDetail }) {
 
 function ManualTab({ d, reload, notify, busy }: { d: ChapterDetail; reload: () => void; notify: Notify; busy: boolean }) {
   const [win, setWin] = useState<{ text: string | null; size_flag: string | null } | null>(null);
-  const [pasted, setPasted] = useState("");
+  // вставленный черновик/ответ модели (20–30 КБ) — в localStorage до приёма (аудит 5.3)
+  const ds = useDraft(`глава:${d.chapter}:ручной`, "", `во вкладке «Окно / ручной режим» главы ${d.chapter}`);
+  const pasted = ds.text;
+  const setPasted = ds.setText;
   const [pending, run] = usePending();
   const locked = busy || pending;
 
@@ -518,7 +559,7 @@ function ManualTab({ d, reload, notify, busy }: { d: ChapterDetail; reload: () =
       try {
         const r = await apiPost<{ draft: number }>(`/api/chapter/${d.chapter}/manual-draft`, { text: pasted });
         notify(`Черновик принят как draft_${r.draft}.`, "ok");
-        setPasted("");
+        ds.discard(); // принято сервером — черновик больше не нужен
         reload();
       } catch (e) {
         notify(String(e));
@@ -530,7 +571,7 @@ function ManualTab({ d, reload, notify, busy }: { d: ChapterDetail; reload: () =
       try {
         const r = await apiPost<{ flags: number }>(`/api/chapter/${d.chapter}/manual-flags`, { text: pasted });
         notify(`Принято флагов Э2: ${r.flags}.`, "ok");
-        setPasted("");
+        ds.discard();
         reload();
       } catch (e) {
         notify(String(e));
@@ -558,6 +599,7 @@ function ManualTab({ d, reload, notify, busy }: { d: ChapterDetail; reload: () =
               <button disabled={locked} onClick={() => copyPrompt("edits", "Промпт правок")}>Скопировать промпт правок</button>
             )}
           </div>
+          <RestoredNote state={ds} />
           <textarea aria-label="Текст черновика" placeholder={`Вставьте текст главы — будет сохранён как draft_${d.draft + 1}.md`}
             value={pasted} onChange={(e) => setPasted(e.target.value)} />
           <div className="actions">
@@ -576,6 +618,7 @@ function ManualTab({ d, reload, notify, busy }: { d: ChapterDetail; reload: () =
               Сформировать и скопировать промпт Э2
             </button>
           </div>
+          <RestoredNote state={ds} />
           <textarea aria-label="Ответ Верификатора-2" placeholder="Вставьте JSON-ответ модели (можно вместе с пояснениями — массив будет найден)"
             value={pasted} onChange={(e) => setPasted(e.target.value)} />
           <div className="actions">
@@ -585,7 +628,15 @@ function ManualTab({ d, reload, notify, busy }: { d: ChapterDetail; reload: () =
       )}
 
       {!needDraft && !needFlags && (
-        <p className="muted">В состоянии «{d.state}» ручной ввод не требуется.</p>
+        <>
+          <p className="muted">В состоянии «{d.state}» ручной ввод не требуется.</p>
+          {pasted.trim() && (
+            <div className="draft-note" role="status">
+              есть невставленный текст ({pasted.length} симв.) из прошлого состояния{" "}
+              <button type="button" onClick={ds.discard}>отбросить</button>
+            </div>
+          )}
+        </>
       )}
 
       {win?.size_flag && <div className="card bad">{win.size_flag}</div>}

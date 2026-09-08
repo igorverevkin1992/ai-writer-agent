@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { apiGet, apiPost } from "./api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { apiGet, apiPost, isConflict } from "./api";
 import type { Notify, RunCommand } from "./App";
 import type { Confirm } from "./Confirm";
+import { compactDiff, lineDiff } from "./diff";
+import { fmtTime, readDraft, removeDraft, RestoredNote, useDraft, writeDraft } from "./drafts";
 import { usePending } from "./hooks";
 import type { LintFinding, LintReport } from "./types";
 
 interface CanonDoc { path: string; name: string; mtime: number; size: number }
+interface Doc { path: string; text: string; version: string }
 interface LintData { report: LintReport | null; changed: string[]; running: boolean; pending: boolean }
 
 const SEV_CLASS: Record<string, string> = { ошибка: "b-BRAK", предупреждение: "b-FLAG", заметка: "" };
@@ -20,15 +23,32 @@ export function Canon(props: {
 }) {
   const { busy: jobBusy, runCommand, notify, confirm, refreshTick } = props;
   const [docs, setDocs] = useState<CanonDoc[]>([]);
-  const [current, setCurrent] = useState<{ path: string; text: string; version: string } | null>(null);
-  const [draft, setDraft] = useState("");
+  const [current, setCurrent] = useState<Doc | null>(null);
   const [lint, setLint] = useState<LintData | null>(null);
   const [filter, setFilter] = useState("");
   const [commitMsg, setCommitMsg] = useState("");
+  // конфликт версии (409): на диске новая версия — различия / перечитать / перезаписать
+  const [conflict, setConflict] = useState<Doc | null>(null);
+  // с чем сравнивать текст редактора: версия с диска (конфликт или устаревший черновик)
+  const [diffBase, setDiffBase] = useState<Doc | null>(null);
+  // резервная копия правок после «Перечитать»
+  const [stash, setStash] = useState<{ text: string; ts: number } | null>(null);
   const [pending, run] = usePending();
   const editor = useRef<HTMLTextAreaElement>(null);
   const busy = jobBusy || pending;
-  const dirty = current !== null && draft !== current.text;
+  // черновик документа: переживает перезагрузку (localStorage) и регистрируется в App как «не сохранено»
+  const draftKey = current ? `канон:${current.path}` : null;
+  const ds = useDraft(draftKey, current?.text ?? "", `в документе «${current?.path ?? ""}»`, current?.version);
+  const draft = ds.text;
+  const dirty = ds.dirty;
+  const staleDraft = ds.restored !== null && ds.restored.base !== undefined && current !== null && ds.restored.base !== current.version;
+
+  useEffect(() => {
+    // смена документа: конфликт и дифф относятся к прошлому; резервная копия — по ключу
+    setConflict(null);
+    setDiffBase(null);
+    setStash(draftKey ? readDraft(`резерв:${draftKey}`) : null);
+  }, [draftKey]);
 
   const loadDocs = useCallback(() => {
     apiGet<{ docs: CanonDoc[] }>("/api/canon").then((r) => setDocs(r.docs)).catch((e) => notify(String(e)));
@@ -51,17 +71,19 @@ export function Canon(props: {
           if (line) jumpTo(draft, line);
           return;
         }
-        if (dirty && !(await confirm(`В «${current?.path}» есть несохранённые правки. Открыть другой документ и потерять их?`))) return;
+        if (dirty) {
+          if (!(await confirm(`В документе «${current?.path}» есть несохранённые правки. Открыть другой документ и потерять их?`))) return;
+          ds.discard();
+        }
         try {
-          const d = await apiGet<{ path: string; text: string; version: string }>(`/api/canon/doc?path=${encodeURIComponent(path)}`);
+          const d = await apiGet<Doc>(`/api/canon/doc?path=${encodeURIComponent(path)}`);
           setCurrent(d);
-          setDraft(d.text);
-          if (line) window.setTimeout(() => jumpTo(d.text, line), 50);
+          if (line) window.setTimeout(() => jumpTo(editor.current?.value ?? d.text, line), 50);
         } catch (e) {
           notify(String(e));
         }
       }),
-    [run, dirty, current, draft, confirm, notify],
+    [run, dirty, current, draft, ds, confirm, notify],
   );
 
   const jumpTo = (text: string, line: number) => {
@@ -76,6 +98,37 @@ export function Canon(props: {
     el.scrollTop = Math.max(0, (line - 4) * lineHeight);
   };
 
+  /** Запись документа; `force` — без проверки версии («Перезаписать всё равно»). */
+  const send = async (doc: Doc, text: string, force: boolean) => {
+    try {
+      const r = await apiPost<{ saved: string; version: string; lint: LintReport | null }>("/api/canon/doc", {
+        path: doc.path, text, ...(force ? {} : { version: doc.version }),
+      });
+      const saved = text.endsWith("\n") ? text : text + "\n"; // сервер дописывает перевод строки
+      ds.clear(); // черновик в localStorage больше не нужен
+      removeDraft(`резерв:канон:${doc.path}`);
+      setStash(null);
+      setConflict(null);
+      setDiffBase(null);
+      setCurrent({ path: doc.path, text: saved, version: r.version });
+      notify(`Сохранено: ${r.saved}`, "ok");
+      loadLint();
+      loadDocs();
+    } catch (e) {
+      if (isConflict(e)) {
+        // 409: на диске новая версия — показать варианты, ничего не терять
+        try {
+          const disk = await apiGet<Doc>(`/api/canon/doc?path=${encodeURIComponent(doc.path)}`);
+          setConflict(disk);
+        } catch (e2) {
+          notify(String(e2));
+        }
+        return;
+      }
+      notify(String(e));
+    }
+  };
+
   const save = () =>
     run(async () => {
       if (!current || !dirty) return;
@@ -84,16 +137,74 @@ export function Canon(props: {
         "выгрузки и проверка противоречий обновятся. Коммит — отдельной кнопкой. (Д-8)",
       );
       if (!ok) return;
+      await send(current, draft, false);
+    });
+
+  const overwrite = () =>
+    run(async () => {
+      if (!current || !conflict) return;
+      const ok = await confirm(
+        `Перезаписать «${current.path}» вашим текстом, затерев версию на диске? ` +
+        "Правка, сделанная на диске после открытия документа, будет потеряна. (Д-8)",
+      );
+      if (!ok) return;
+      await send(current, draft, true);
+    });
+
+  /** «Перечитать»: правки автора — в буфер обмена и в резервную копию (localStorage), в редактор — версия с диска. */
+  const reread = () =>
+    run(async () => {
+      if (!current || !conflict || !draftKey) return;
+      const mine = draft;
+      let copied = true;
       try {
-        const r = await apiPost<{ saved: string; version: string; lint: LintReport | null }>("/api/canon/doc", {
-          path: current.path, text: draft, version: current.version,
-        });
-        const saved = draft.endsWith("\n") ? draft : draft + "\n"; // сервер дописывает перевод строки
-        setCurrent({ path: current.path, text: saved, version: r.version });
-        setDraft(saved);
-        notify(`Сохранено: ${r.saved}`, "ok");
-        loadLint();
-        loadDocs();
+        await navigator.clipboard.writeText(mine);
+      } catch {
+        copied = false;
+      }
+      writeDraft(`резерв:${draftKey}`, mine, current.version);
+      setStash({ text: mine, ts: Date.now() });
+      removeDraft(draftKey); // иначе черновик восстановился бы поверх версии с диска
+      setCurrent(conflict);
+      setConflict(null);
+      setDiffBase(null);
+      notify(
+        copied
+          ? "Загружена версия с диска. Ваши правки скопированы в буфер обмена и сохранены как резервная копия."
+          : "Загружена версия с диска. Ваши правки сохранены как резервная копия (буфер обмена недоступен).",
+        "ok",
+      );
+    });
+
+  const unstash = () => {
+    if (!stash || !draftKey) return;
+    ds.setText(stash.text);
+    removeDraft(`резерв:${draftKey}`);
+    setStash(null);
+  };
+
+  const dropStash = () => {
+    if (!draftKey) return;
+    removeDraft(`резерв:${draftKey}`);
+    setStash(null);
+  };
+
+  /** «Отменить правки»: не подменять текст устаревшей версией — перечитать документ с диска. */
+  const revert = () =>
+    run(async () => {
+      if (!current || !dirty) return;
+      if (!(await confirm(`Отменить несохранённые правки в «${current.path}»?`))) return;
+      try {
+        const d = await apiGet<Doc>(`/api/canon/doc?path=${encodeURIComponent(current.path)}`);
+        ds.discard();
+        setConflict(null);
+        setDiffBase(null);
+        if (d.version !== current.version) {
+          setCurrent(d);
+          notify("Правки отменены; документ на диске изменился с момента открытия — загружена новая версия.", "ok");
+        } else {
+          notify("Правки отменены.", "ok");
+        }
       } catch (e) {
         notify(String(e));
       }
@@ -102,6 +213,9 @@ export function Canon(props: {
   const applyFix = (f: LintFinding) =>
     run(async () => {
       if (!f.fix) return;
+      if (dirty && current && current.path === f.fix.file) {
+        return notify("В этом документе есть несохранённые правки — сначала сохраните или отмените их, затем применяйте исправление.");
+      }
       const ok = await confirm(`Применить исправление в ${f.fix.file}:${f.fix.line}?\n«${f.fix.old}» → «${f.fix.new}»\n(${f.fix.note || "механическая правка"}; запись в библиотеку канона, Д-8)`);
       if (!ok) return;
       try {
@@ -109,8 +223,8 @@ export function Canon(props: {
         notify("Исправление применено — канон перепроверен.", "ok");
         loadLint();
         if (current && current.path === f.fix.file) {
-          const d = await apiGet<{ path: string; text: string; version: string }>(`/api/canon/doc?path=${encodeURIComponent(current.path)}`);
-          setCurrent(d); setDraft(d.text);
+          const d = await apiGet<Doc>(`/api/canon/doc?path=${encodeURIComponent(current.path)}`);
+          setCurrent(d);
         }
       } catch (e) {
         notify(String(e));
@@ -145,6 +259,7 @@ export function Canon(props: {
   const findings = (report?.findings ?? []).map((f, index) => ({ f, index }))
     .filter(({ f }) => !filter || f.file === filter);
   const visibleDocs = docs.filter((d) => d.path.endsWith(".md"));
+  const diffRows = useMemo(() => (diffBase ? lineDiff(diffBase.text, draft) : null), [diffBase, draft]);
 
   return (
     <>
@@ -192,12 +307,65 @@ export function Canon(props: {
               <div className="row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <strong>{current.path}{dirty ? " · не сохранено" : ""}</strong>
                 <div className="actions" style={{ margin: 0 }}>
-                  <button disabled={!dirty || busy} onClick={() => setDraft(current.text)}>Отменить правки</button>
+                  <button disabled={!dirty || busy} onClick={revert}>Отменить правки</button>
                   <button className="primary" disabled={!dirty || busy} onClick={save}>Сохранить (Ctrl+S)</button>
                 </div>
               </div>
+              <RestoredNote state={ds} extra={staleDraft ? "документ на диске с тех пор изменился, проверьте различия перед сохранением" : undefined} />
+              {staleDraft && !diffBase && (
+                <div className="actions" style={{ margin: "4px 0" }}>
+                  <button onClick={() => setDiffBase(current)}>Показать различия с диском</button>
+                </div>
+              )}
+              {stash && (
+                <div className="draft-note" role="status">
+                  резервная копия ваших правок от {fmtTime(stash.ts)} (после конфликта версий){" "}
+                  <button type="button" disabled={busy} onClick={unstash}>вернуть в редактор</button>{" "}
+                  <button type="button" disabled={busy} onClick={dropStash}>удалить</button>
+                </div>
+              )}
+              {conflict && (
+                <div className="card conflict" role="alertdialog" aria-labelledby="conflict-title">
+                  <strong id="conflict-title">На диске новая версия «{current.path}»</strong>
+                  <p className="muted" style={{ margin: "4px 0 8px" }}>
+                    Документ изменён после того, как вы его открыли (другой редактор, исправление линтера или git).
+                    Ваш текст не сохранён и не потерян: выберите, что делать.
+                  </p>
+                  <div className="actions" style={{ margin: 0 }}>
+                    <button onClick={() => setDiffBase(diffBase ? null : conflict)}>
+                      {diffBase ? "Скрыть различия" : "Показать различия"}
+                    </button>
+                    <button disabled={busy} onClick={reread}>Перечитать (мои правки — в буфер обмена и в резервную копию)</button>
+                    <button className="danger" disabled={busy} onClick={overwrite}>Перезаписать всё равно</button>
+                    <button onClick={() => { setConflict(null); setDiffBase(null); }}>Закрыть</button>
+                  </div>
+                </div>
+              )}
+              {diffBase && diffRows && (
+                <div className="diff-wrap">
+                  <div className="row" style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                    <span className="muted">
+                      различия: <span className="del">− только на диске</span> · <span className="add">+ только у вас</span>
+                      {diffRows.approximate && " · документ большой — показаны только несовпадающие строки, без выравнивания"}
+                      {diffRows.lines.every((l) => l.kind === " ") && " · текст совпадает с диском"}
+                    </span>
+                    <button onClick={() => setDiffBase(null)}>скрыть</button>
+                  </div>
+                  <div className="diff">
+                    {compactDiff(diffRows.lines).map((l, i) =>
+                      l.kind === "…" ? (
+                        <div key={i} className="muted">… {l.count} стр. без изменений …</div>
+                      ) : (
+                        <div key={i} className={l.kind === "+" ? "add" : l.kind === "-" ? "del" : ""}>
+                          {l.kind}{" "}{l.text}
+                        </div>
+                      ),
+                    )}
+                  </div>
+                </div>
+              )}
               <textarea ref={editor} className="canon-text" value={draft} spellCheck={false}
-                onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey} aria-label={`Документ ${current.path}`} />
+                onChange={(e) => ds.setText(e.target.value)} onKeyDown={onKey} aria-label={`Документ ${current.path}`} />
             </>
           ) : (
             <p className="muted">Выберите документ слева. Находки справа ведут к нужной строке.</p>

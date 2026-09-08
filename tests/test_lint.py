@@ -184,11 +184,40 @@ def test_панель_канон_чтение_правка_и_линт(panel, ws
     assert status == 200 and any(f["code"] == "ХРОН-2" for f in l["report"]["findings"])
     # устаревшая версия — конфликт (версия = хэш содержимого: переживает JSON/JavaScript, в отличие от mtime_ns)
     status, r = _post(f"{base}/api/canon/doc", {"path": "23_Поглавник_Том1.md", "text": text, "version": doc["version"]})
-    assert status == 400 and "изменён на диске" in r["error"]
+    assert status == 409 and "изменён на диске" in r["error"] and r["code"] == "конфликт"
     assert isinstance(doc["version"], str) and len(doc["version"]) == 64
     # сводка в состоянии панели
     status, st = _get(f"{base}/api/state")
     assert st["lint"]["errors"] >= 1
+
+
+def test_панель_конфликт_версии_409_и_перезапись_без_версии(panel, ws, library):
+    """Аудит 5.2: конфликт версии — отдельный код 409 с «code»: «конфликт», а не общий 400;
+    повторная отправка без version — осознанная перезапись автором («Перезаписать всё равно»)."""
+    base, api = panel
+    rel = "23_Поглавник_Том1.md"
+    status, doc = _get(f"{base}/api/canon/doc?path=" + urllib.parse.quote(rel))
+    assert status == 200
+    # документ изменили «на диске» (другой редактор) после того, как автор открыл его в панели
+    p = library / rel
+    disk = doc["text"].replace("Глава 1", "Глава 1 (правка на диске)", 1)
+    p.write_text(disk, encoding="utf-8")
+    mine = doc["text"] + "\n<!-- правка автора в панели -->\n"
+    status, r = _post(f"{base}/api/canon/doc", {"path": rel, "text": mine, "version": doc["version"]})
+    assert status == 409, r
+    assert r["code"] == "конфликт" and "изменён на диске" in r["error"]
+    assert p.read_text(encoding="utf-8") == disk          # ничего не затёрто
+    # перечитать: версия на диске новая и отличается от той, что была у автора
+    status, fresh = _get(f"{base}/api/canon/doc?path=" + urllib.parse.quote(rel))
+    assert status == 200 and fresh["version"] != doc["version"] and "правка на диске" in fresh["text"]
+    # «Перезаписать всё равно»: без version — проверка версии не выполняется, файл перезаписан
+    status, r = _post(f"{base}/api/canon/doc", {"path": rel, "text": mine})
+    assert status == 200, r
+    assert r["saved"] == rel and r["version"] not in (doc["version"], fresh["version"])
+    assert p.read_text(encoding="utf-8") == mine
+    # прочие ошибки остаются 400 без «code»: путь вне библиотеки
+    status, r = _post(f"{base}/api/canon/doc", {"path": "../config.yaml", "text": "x"})
+    assert status == 400 and "code" not in r
 
 
 def test_панель_применяет_исправление(panel, ws, library):

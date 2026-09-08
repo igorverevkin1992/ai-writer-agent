@@ -113,3 +113,14 @@ ol.circle li { margin: 6px 0; }
 .canon-docs .qitem { padding: 6px 8px; font-size: 12.5px; margin-bottom: 5px; }
 .canon-text { width: 100%; min-height: 60vh; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px;
   line-height: 18px; white-space: pre; overflow: auto; margin-top: 8px; }
+
+/* защита текста автора (аудит 5.1–5.3): черновик, конфликт версии, дифф */
+.draft-note { font-size: 12.5px; color: var(--ink-2); background: color-mix(in srgb, var(--warn) 14%, transparent);
+              border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent); border-radius: 7px; padding: 5px 10px; margin: 6px 0; }
+.draft-note button { font-size: 12px; padding: 1px 8px; }
+.card.conflict { border-color: var(--crit); }
+.diff-wrap { margin: 6px 0; }
+.diff-wrap .diff { max-height: 40vh; overflow-y: auto; }
+.diff .del, .diff-wrap .del { color: var(--crit); }
+.diff .add, .diff-wrap .add { color: var(--good); }
+.tab-dot { color: var(--warn); margin-left: 4px; }
