@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from ugar import compiler, exporter, gitops, guard, verifier2
+from ugar import compiler, exporter, gitops, guard, realcanon, verifier2
 from ugar.cli import app
 from ugar.fsm import ChapterState
 from ugar.paths import Workspace
