@@ -20,6 +20,8 @@ from .mdparse import MarkupError, cell, parse_number
 from .schemas import (
     Brief,
     ContinuityEvent,
+    DocumentSpec,
+    Dose,
     Dossier,
     InfoBan,
     MatrixFact,
@@ -444,6 +446,26 @@ def load_acts(exports_dir: Path) -> list[Act]:
     return [Act.model_validate(a) for a in load_export(exports_dir, "acts.json")]
 
 
+def export_doses(library: Path) -> list[Dose]:
+    """Дозы прошлого — §5 реестра информрежима «Три дозы 1913 года»; без реестра/раздела — пусто."""
+    reg = _registry(library)
+    return realcanon.parse_doses(reg) if reg is not None else []
+
+
+def load_doses(exports_dir: Path) -> list[Dose]:
+    return [Dose.model_validate(d) for d in load_export(exports_dir, "doses.json")]
+
+
+def export_documents(library: Path) -> list[DocumentSpec]:
+    """Документы-вставки — §6 реестра информрежима «Реестр документов»; без реестра/раздела — пусто."""
+    reg = _registry(library)
+    return realcanon.parse_documents(reg) if reg is not None else []
+
+
+def load_documents(exports_dir: Path) -> list[DocumentSpec]:
+    return [DocumentSpec.model_validate(d) for d in load_export(exports_dir, "documents.json")]
+
+
 def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
     """corpus/ — принятые главы в нормализованном виде (для n-грамм и TTR)."""
     corpus_dir = exports_dir / "corpus"
@@ -485,6 +507,8 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, st
         "parts.json": export_parts(library),
         "circles.json": export_circles(library),
         "acts.json": export_acts(library),
+        "doses.json": export_doses(library),
+        "documents.json": export_documents(library),
     }
     hashes: dict[str, str] = {}
     for name, data in parsed.items():

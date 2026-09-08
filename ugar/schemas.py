@@ -82,6 +82,36 @@ class Brief(BaseModel):
     plants: list[str] = Field(default_factory=list)     # plant_id, назначенные главе
     # документы-вставки главы из поглавника («→ ДОКУМЕНТ №N (после главы): …»)
     documents: list[str] = Field(default_factory=list)
+    # колонка сетки «Что нового знает читатель» — для Э2/автора/линтера; Писателю не передаётся
+    reader_learns: str = ""
+
+
+class Dose(BaseModel):
+    """Строка doses.json — §5 реестра «Три дозы 1913 года» (канал воспоминаний Лемма).
+
+    Единственный разрешённый канал прошлого внутри тома; в окно идёт ТОЛЬКО доза своей главы (FR-C3)."""
+
+    dose_id: str            # «№1»
+    chapter: int
+    volume: int = 1
+    trigger: str = ""
+    reader_gets: str = ""       # «Что получает читатель»
+    reader_not_gets: str = ""   # «Чего НЕ получает»
+    form: str = ""              # вводный абзац §5 (что такое доза) — общий для всех доз
+    rule: str = ""              # «Правило доз» — фразы, относящиеся к этой дозе (общие + адресные «в дозе №N»)
+
+
+class DocumentSpec(BaseModel):
+    """Строка documents.json — §6 реестра «Реестр документов» (рапорты Степана)."""
+
+    number: int
+    after_chapter: int
+    volume: int = 1
+    kind: str = ""          # из заголовка раздела: «рапорты Степана»
+    style: str = ""
+    divergence: str = ""    # «Расхождение с правдой, которую видел читатель»
+    form: str = ""          # вводный абзац §6 (как верстается документ) — общий для всех
+    scale: str = ""         # строка языковой шкалы, относящаяся к этому номеру («№1–3 — …»)
 
 
 class Dossier(BaseModel):

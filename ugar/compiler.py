@@ -282,6 +282,50 @@ def chapter_plants(exports_dir: Path, brief: Brief) -> list:
     return sorted(selected, key=lambda p: p.plant_id)
 
 
+def chapter_doses(exports_dir: Path, brief: Brief) -> list:
+    """Доза прошлого главы (§5 реестра): ТОЛЬКО доза этой главы — содержание доз других глав
+    (в том числе будущее относительно фокала) в окно не идёт (FR-C3)."""
+    try:
+        doses = exporter.load_doses(exports_dir)
+    except FileNotFoundError:
+        return []
+    return sorted(
+        (d for d in doses if d.volume == brief.volume and d.chapter == brief.chapter),
+        key=lambda d: d.dose_id,
+    )
+
+
+# строка брифа из поглавника: «№1 (после главы): описание»
+_BRIEF_DOC_RE = re.compile(r"№\s*(\d+)\s*(?:\(([^)]*)\))?\s*:?\s*(.*)")
+
+
+def chapter_documents(exports_dir: Path, brief: Brief) -> list[dict]:
+    """Документы-вставки главы: §6 реестра («После гл.» = N) и строки «→ ДОКУМЕНТ №N» поглавника,
+    объединённые по номеру — один документ, без дублей; в окно — только документы своей главы."""
+    try:
+        specs = exporter.load_documents(exports_dir)
+    except FileNotFoundError:
+        specs = []
+    docs: dict[int, dict] = {}
+    for sp in specs:
+        if sp.volume == brief.volume and sp.after_chapter == brief.chapter:
+            docs[sp.number] = {
+                "number": sp.number, "kind": sp.kind, "position": "после главы", "note": "",
+                "style": sp.style, "divergence": sp.divergence, "scale": sp.scale, "form": sp.form,
+            }
+    for line in brief.documents:
+        m = _BRIEF_DOC_RE.match(line.strip())
+        if not m:
+            continue
+        num = int(m.group(1))
+        doc = docs.setdefault(num, {"number": num, "kind": "", "position": "после главы", "note": "",
+                                    "style": "", "divergence": "", "scale": "", "form": ""})
+        if m.group(2):
+            doc["position"] = m.group(2).strip()
+        doc["note"] = m.group(3).strip()
+    return [docs[n] for n in sorted(docs)]
+
+
 def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars: int = 80_000) -> tuple[Path, dict[str, int]]:
     """Собирает окно главы N. Возвращает (путь, раскладка размеров по секциям)."""
     exports_dir = ws.exports
@@ -369,6 +413,8 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
         known_facts=known,
         not_knows=not_knows,
         plants=chapter_plants(exports_dir, brief),
+        doses=chapter_doses(exports_dir, brief),
+        documents=chapter_documents(exports_dir, brief),
         bans=bans,
         intensifiers=intensifiers,
         volume_norm=norms.get("объём_главы"),

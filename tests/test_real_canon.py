@@ -5,6 +5,7 @@
 калибровка счётчиков на реальном макете гл. 4 (10.1).
 """
 
+import json
 import shutil
 from pathlib import Path
 
@@ -144,3 +145,87 @@ def test_э1_по_принятой_главе_5(real):
     assert by_id["V1.6_утечка_окна"].status == "PASS"
     assert by_id["V1.2e_объём"].status == "PASS"               # 752 слова в коридоре 700–800 (Р-019)
     assert "700" in by_id["V1.2e_объём"].threshold
+
+
+# ------------------------------------------------ аудит 2, 1.1/1.2: дозы §5, документы §6, колонка читателя
+
+
+def test_дозы_и_документы_реестра(real):
+    doses = exporter.load_doses(real.exports)
+    assert [(d.dose_id, d.chapter) for d in doses] == [("№1", 12), ("№2", 22), ("№3", 32)]
+    d1, d2, d3 = doses
+    assert d1.trigger.startswith("Чужая сфабрикованная бумага") and "печь в мае" in d1.reader_gets
+    assert d1.reader_not_gets == "Ни слова о подлоге, ни слова о судьбе сына"
+    assert d3.reader_gets.startswith("Полная картина") and "живым медиком" in d3.reader_not_gets
+    assert all(d.form.startswith("Единственная разрешённая форма прошлого") for d in doses)
+    # правило доз: общая фраза — каждой дозе, адресная «в дозе №1» — только дозе №1
+    assert all(d.rule.startswith("интонация — протокольная") for d in doses)
+    assert "«Печь в мае» появляется только в дозе №1 и в гл. 46" in d1.rule
+    assert "печь в мае" not in d2.rule.lower() and "печь в мае" not in d3.rule.lower()
+
+    docs = exporter.load_documents(real.exports)
+    assert [(d.number, d.after_chapter) for d in docs] == [(1, 2), (2, 8), (3, 14), (4, 21), (5, 35), (6, 44)]
+    assert docs[0].style == "Чистый комсомольский канцелярит, лозунги" and docs[0].kind == "рапорты Степана"
+    assert "нестыковка маршрута" in docs[5].divergence and "гл. 39–41" in docs[5].divergence
+    assert all(d.form.startswith("Первое лицо внутри третьего") for d in docs)
+    assert docs[2].scale == "№1–3 — «доношу до вашего сведения», штампы, страдательный залог"
+    assert docs[3].scale.startswith("№4–6 — появляются точные детали") and "тому 4" not in docs[3].scale
+
+    briefs = {b.chapter: b for b in exporter.load_briefs(real.exports)}
+    assert briefs[1].reader_learns.startswith("Червонец — не эпизод")
+    assert "Доза 1913 №1" in briefs[12].reader_learns and "полная картина подлога" in briefs[32].reader_learns
+    assert "Документ №3" in briefs[14].reader_learns
+    manifest = json.loads((real.exports / "manifest.json").read_text(encoding="utf-8"))
+    assert {"doses.json", "documents.json"} <= set(manifest["files"])
+
+
+def _sections(window: str) -> dict[str, str]:
+    parts = compiler.SECTION_RE.split(window)
+    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2)}
+
+
+def test_секции_дозы_и_документа_только_в_своих_главах(real):
+    """Доза — только в окне своей главы (в 32 — будущее относительно фокала других глав, FR-C3),
+    документ — только в окне главы «После гл.»; «печь в мае» из правила доз — в 12 и 46."""
+    briefs = exporter.load_briefs(real.exports)
+    windows = {b.chapter: compiler.compile_window(real, LIBRARY, b.chapter)[0].read_text(encoding="utf-8") for b in briefs}
+    with_dose = {ch for ch, w in windows.items() if "доза прошлого" in _sections(w)}
+    with_doc = {ch for ch, w in windows.items() if "документ-вставка" in _sections(w)}
+    assert with_dose == {12, 22, 32} and with_doc == {2, 8, 14, 21, 35, 44}
+    for ch, w in windows.items():
+        if ch != 32:
+            assert "Полная картина: улики против сына" not in w, ch
+        if ch != 12:
+            assert "Чужая сфабрикованная бумага" not in w, ch
+        if ch != 44:
+            assert "изъята нестыковка маршрута" not in w, ch
+    # «печь в мае» из правила доз — в окнах 12 и 46; гл. 6 несёт собственную пометку поглавника
+    # «рифма «печь в мае» ещё не предъявлена» в бите сцены 6.2 (запрет, не предъявление)
+    pech = {ch for ch, w in windows.items() if "печь в мае" in w.lower()}
+    assert pech - {6} == {12, 46}
+    assert "ещё не предъявлена" in windows[6]
+    assert not any("### Документы-вставки" in w for w in windows.values())  # старый список брифа заменён секцией
+
+    s12 = _sections(windows[12])["доза прошлого"]
+    assert "### Доза №1" in s12 and "- Триггер: Чужая сфабрикованная бумага в деле «Треста»" in s12
+    assert "- Чего НЕ получает: Ни слова о подлоге" in s12
+    assert (
+        "- Правило доз: интонация — протокольная, без самооправданий; сентимент запрещён (регистр Кучера). "
+        "«Печь в мае» появляется только в дозе №1 и в гл. 46" in s12
+    )
+    s22 = _sections(windows[22])["доза прошлого"]
+    assert "### Доза №2" in s22 and "печь в мае" not in s22.lower()
+
+    s44 = _sections(windows[44])["документ-вставка"]
+    assert "## Документ-вставка №6 (рапорты Степана)" in s44 and "- Положение: после главы" in s44
+    assert "- Стиль: Внешне безупречный, спокойный — впервые «профессиональный»" in s44
+    assert "- Языковая шкала: №4–6 — появляются точные детали" in s44 and "№1–3" not in s44
+    assert "Первое лицо внутри третьего" in s44
+    s14 = _sections(windows[14])["документ-вставка"]
+    assert "## Документ-вставка №3" in s14 and "- Стиль: Вымученный, под давлением куратора" in s14
+    assert "- Языковая шкала: №1–3 — «доношу до вашего сведения»" in s14
+    # гл. 2: §6 и строка «→ ДОКУМЕНТ №1» поглавника слиты в один документ
+    s2 = _sections(windows[2])["документ-вставка"]
+    assert s2.count("## Документ-вставка") == 1 and "- По поглавнику: первый рапорт" in s2 and "- Стиль: Чистый" in s2
+    # колонка «Что нового знает читатель» Писателю не передаётся
+    assert "Матрёшка: игра внутри игры" not in windows[12] and "находит изъятие сам" not in windows[44]
