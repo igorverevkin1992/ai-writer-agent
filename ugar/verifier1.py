@@ -252,7 +252,7 @@ def analyze(
         add("V1.2b_доля_коротких", "доля_коротких", round(sum(1 for x in lengths if x <= short_thr) / len(lengths), 3))
         add("V1.2c_доля_длинных", "доля_длинных", round(sum(1 for x in lengths if x >= long_thr) / len(lengths), 3))
         if "максимум_длины" in norms:  # опциональная норма
-            longest = max(zip(lengths, [s for s in sentences if textutils.words(s)]))
+            longest = max(zip(lengths, [s for s in sentences if textutils.words(s)], strict=True))
             add("V1.2d_максимум_длины", "максимум_длины", longest[0], quotes=[longest[1]])
 
     if not brief.volume_words and "объём_главы" in norms:

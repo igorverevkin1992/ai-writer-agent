@@ -1,6 +1,5 @@
 """Тесты продуктовых улучшений: doctor, status, resolve, edits, check, diff, init --демо…"""
 
-import json
 import subprocess
 
 import pytest

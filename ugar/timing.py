@@ -24,7 +24,7 @@ def chapter_times(history: list[dict]) -> tuple[float, float]:
     """
     machine = 0.0
     author = 0.0
-    for cur, nxt in zip(history, history[1:]):
+    for cur, nxt in zip(history, history[1:], strict=False):  # пары соседей
         try:
             delta = (_parse(nxt["время"]) - _parse(cur["время"])).total_seconds()
         except (KeyError, ValueError):

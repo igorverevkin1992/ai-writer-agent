@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -387,7 +386,7 @@ def _update_plants_status(ws: Workspace, library: Path, chapter: int) -> list[st
     if placed_col is None:
         return notes
     remaining: list[str] = []
-    for p, note in zip(plants, notes):
+    for p, note in zip(plants, notes, strict=True):
         m = re.fullmatch(r"З-(\d+)", p.plant_id)
         idx = table + 1 + int(m.group(1)) if m else None
         if idx is None or idx >= len(lines) or not lines[idx].strip().startswith("|"):

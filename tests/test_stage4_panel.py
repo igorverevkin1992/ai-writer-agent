@@ -8,8 +8,6 @@ import json
 import re
 import threading
 import time
-import urllib.error
-import urllib.request
 
 import pytest
 
@@ -122,9 +120,8 @@ def test_dashboard_по_get_не_пишет_файл(panel, ws):
 def test_exclusive_не_ждёт_а_отклоняет():
     jobs = server.JobRunner()
     with jobs.exclusive():
-        with pytest.raises(RuntimeError, match="дождитесь"):
-            with jobs.exclusive():
-                pass
+        with pytest.raises(RuntimeError, match="дождитесь"), jobs.exclusive():
+            pass
         with pytest.raises(RuntimeError, match="дождитесь"):
             jobs.start("compile", 1, lambda: None)
     # после выхода замок свободен

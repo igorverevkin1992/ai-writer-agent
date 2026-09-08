@@ -85,12 +85,12 @@ def line_chart(
     thresholds = thresholds or []
     outliers = outliers or set()
     sx, sy, y_min, y_max = _scales([float(x) for x in xs], ys, thresholds)
-    path = " ".join(f"{'M' if i == 0 else 'L'}{sx(x):.1f},{sy(y):.1f}" for i, (x, y) in enumerate(zip(xs, ys)))
+    path = " ".join(f"{'M' if i == 0 else 'L'}{sx(x):.1f},{sy(y):.1f}" for i, (x, y) in enumerate(zip(xs, ys, strict=True)))
     markers = "".join(
         f'<circle class="{"marker-out" if i in outliers else "marker"}" cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="4">'
         f"<title>{html.escape(tooltip.format(x=x, y=_fmt(y)))}"
         f"{' — отклонение >20% от среднего' if i in outliers else ''}</title></circle>"
-        for i, (x, y) in enumerate(zip(xs, ys))
+        for i, (x, y) in enumerate(zip(xs, ys, strict=True))
     )
     # подпись последней точки — над маркером, якорь к правому краю (не обрезается рамкой)
     last_x, last_y = xs[-1], ys[-1]
@@ -126,7 +126,7 @@ def bar_chart(
     step = inner / len(labels)
     bw = max(6.0, min(48.0, step - 2))
     bars = []
-    for i, (lab, v) in enumerate(zip(labels, values)):
+    for i, (lab, v) in enumerate(zip(labels, values, strict=True)):
         x = PAD_L + i * step + (step - bw) / 2
         y = sy(v)
         r = min(4.0, bw / 2, abs(y0 - y))

@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from ugar import canonwatch, exporter, guard, lint, server
+from ugar import canonwatch, guard, lint, server
 from ugar.cli import app
 from ugar.config import Config
 from ugar.paths import Workspace
-from ugar.schemas import LintFinding, LintFix
+from ugar.schemas import LintFix
 
 REPO = Path(__file__).resolve().parent.parent
 LIBRARY = REPO / "УГАР_Библиотека"
@@ -328,3 +328,11 @@ def test_панель_lint_с_ошибками_не_помечается_сбо�
     assert r.exit_code == 0 and "ХРОН-2" in r.output
     r = CliRunner().invoke(app, ["lint", "--llm", "--no-strict"])
     assert r.exit_code == 0 and "Модельный слой пропущен" in r.output
+
+
+def test_хронология_стык_года_не_ошибка(ws, library):
+    """«30 декабря» → «2 января» без явного года — переход через Новый год, а не нарушение хронологии."""
+    _edit(library / "23_Поглавник_Том1.md", "- Дата: 12 июня 1995", "- Дата: 30 декабря")
+    _edit(library / "23_Поглавник_Том1.md", "- Дата: 3 июля 1995", "- Дата: 2 января")
+    report = lint.run_lint(library, ws.exports, ws.logs)
+    assert not any(f.code == "ХРОН-2" for f in report.findings)

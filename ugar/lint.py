@@ -14,13 +14,12 @@
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from . import adapters, compiler, exporter, guard, llmjson, realcanon, verifier1
+from . import adapters, exporter, guard, llmjson, realcanon, verifier1
 from .config import Config
 from .mdparse import MarkupError
 from .paths import Workspace
@@ -101,7 +100,8 @@ def check_chronology(briefs: list[Brief], reg_path: Path | None) -> list[LintFin
                 message=f"гл. {b.chapter}: дата «{b.date}» вне календаря",
             ))
             continue
-        if last is not None and d < last:
+        if last is not None and d < last and not (last[0] == 12 and mon == 1):
+            # стык года без явного года («30 декабря» → «2 января») — не нарушение
             out.append(LintFinding(
                 code="ХРОН-2", severity="ошибка", file=_rel_or("", reg_path),
                 line=_find_line(reg_path, f"| {b.chapter} |") if reg_path else None,

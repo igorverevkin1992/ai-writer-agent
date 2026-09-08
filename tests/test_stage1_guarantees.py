@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from ugar import compiler, exporter, gitops, guard, realcanon, verifier2
+from ugar import compiler, exporter, gitops, guard, verifier2
 from ugar.cli import app
 from ugar.fsm import ChapterState
 from ugar.paths import Workspace
@@ -190,7 +190,6 @@ def test_цикл_правок_стартует_от_базы_приёмки(ws,
     for state, cmd in (("собрано", "compile"), ("сгенерировано", "write"), ("верифицировано-1", "verify1"), ("верифицировано-2", "verify2")):
         st.transition(state, cmd)
     st.data["черновик"] = 1; st._save()
-    from ugar import verifier1
     ws.chapter_dir(n).joinpath("verdict.json").write_text(json.dumps({"chapter": 1, "draft": 1, "checks": []}), encoding="utf-8")
     ws.chapter_dir(n).joinpath("flags.json").write_text("[]", encoding="utf-8")
     assert runner.invoke(app, ["review", str(n)]).exit_code == 0

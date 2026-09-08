@@ -9,10 +9,9 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-import yaml
 from typer.testing import CliRunner
 
-from ugar import canonist, compiler, gitops, guard, review, server, verifier1, verifier2
+from ugar import canonist, compiler, gitops, review, server, verifier1, verifier2
 from ugar.cli import app
 from ugar.config import Config
 from ugar.fsm import ChapterState, StatusFileError

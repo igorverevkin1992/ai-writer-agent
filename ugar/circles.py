@@ -197,7 +197,7 @@ def build_material(ws: Workspace, scope: str, key: int | None = None) -> tuple[s
         material = "\n".join(
             [*outer_block, *head, *_chapter_rows(briefs, lo, hi), "",
              "## Тайны, раскрываемые читателю в этом акте",
-             *[s for b, s in zip([b for b in bans if b.secret], secrets) if b.until_chapter and lo <= b.until_chapter <= hi]]
+             *[s for b, s in zip([b for b in bans if b.secret], secrets, strict=True) if b.until_chapter and lo <= b.until_chapter <= hi]]
         )
         return f"Акт {act.act} «{act.title}»", material
     if scope == "глава":

@@ -108,13 +108,13 @@ def render_dashboard(ws: Workspace) -> str:
         _figure(
             "Правки автора на 1000 слов",
             bar_chart([str(c) for c in chapters], values, tooltip="глава {x}: {y} правок/1000"),
-            data_table(["Глава", "Правок/1000"], list(zip(chapters, values))),
+            data_table(["Глава", "Правок/1000"], list(zip(chapters, values, strict=True))),
         )
     )
 
     # метрики Э1 с коридорами и выбросами >20% от среднего части
     for key, title, norm_id in METRIC_KEYS:
-        pairs = [(c, m.get(key)) for c, m in zip(chapters, metrics) if m.get(key) is not None]
+        pairs = [(c, m.get(key)) for c, m in zip(chapters, metrics, strict=True) if m.get(key) is not None]
         if not pairs:
             continue
         xs = [float(c) for c, _ in pairs]
@@ -171,7 +171,7 @@ def render_dashboard(ws: Workspace) -> str:
         _figure(
             "Токены по ролям",
             bar_chart(roles, [float(t) for t in tokens], tooltip="{x}: {y} токенов"),
-            data_table(["Роль", "Токены", "Стоимость, $"], list(zip(roles, tokens, costs))),
+            data_table(["Роль", "Токены", "Стоимость, $"], list(zip(roles, tokens, costs, strict=True))),
         )
     )
     if any(costs):

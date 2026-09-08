@@ -31,7 +31,7 @@ from pydantic import ValidationError
 
 from . import exporter, guard, review, timing, verifier2
 from .config import Config
-from .fsm import ChapterState, all_states
+from .fsm import ChapterState
 from .paths import Workspace
 
 # команды такта, доступные из панели (белый список)
@@ -623,9 +623,8 @@ class PanelAPI:
             fix = LintFix(**{k: fix_data[k] for k in ("file", "line", "old", "new", "note") if fix_data.get(k) is not None})
         except (TypeError, ValidationError) as e:
             raise ValueError(f"некорректное исправление: {e}") from None
-        with self.jobs.exclusive():
-            with guard.canon_write_session():
-                lint_mod.apply_fix(self.library, fix)
+        with self.jobs.exclusive(), guard.canon_write_session():
+            lint_mod.apply_fix(self.library, fix)
         self.watcher._snapshot = self.watcher._scan()
         self.request_lint([fix.file], wait=15.0)
         return {"applied": fix.model_dump(), "lint": self.lint_summary()}

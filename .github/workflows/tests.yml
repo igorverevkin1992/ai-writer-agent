@@ -21,7 +21,9 @@ jobs:
       - name: Git с кириллическими путями
         run: git config --global core.quotepath off
       - name: Установка
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev]" ruff
+      - name: Линт кода (ruff)
+        run: ruff check ugar tests
       - name: Тесты
         env:
           PYTHONUTF8: "1"

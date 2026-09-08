@@ -10,7 +10,7 @@ from ugar import adapters, exporter, regression, review, textutils
 from ugar.cli import app
 from ugar.config import Config, ModelConfig
 from ugar.fsm import ChapterState
-from ugar.schemas import Flag, GoldenTest
+from ugar.schemas import Flag
 
 runner = CliRunner()
 

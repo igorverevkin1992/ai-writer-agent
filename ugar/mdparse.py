@@ -85,7 +85,7 @@ def parse_tables(path: Path, text: str | None = None, start_line: int = 1) -> li
                         path, start_line + i,
                         f"в таблице {len(headers)} колонок, в строке — {len(cells)}",
                     )
-                table.rows.append(dict(zip(headers, cells)))
+                table.rows.append(dict(zip(headers, cells, strict=True)))
                 i += 1
             tables.append(table)
         else:

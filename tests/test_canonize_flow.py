@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from ugar import canonist, compiler, exporter, gitops, review
+from ugar import canonist, compiler, gitops, review
 from ugar.config import Config
 from ugar.fsm import ChapterState
 from ugar.schemas import Flag, Resolution

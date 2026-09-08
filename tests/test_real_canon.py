@@ -5,7 +5,6 @@
 калибровка счётчиков на реальном макете гл. 4 (10.1).
 """
 
-import re
 import shutil
 from pathlib import Path
 
