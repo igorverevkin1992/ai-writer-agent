@@ -19,6 +19,7 @@ from . import guard, mdparse, realcanon, textutils
 from .mdparse import MarkupError, cell, parse_number
 from .schemas import (
     ChronicleEvent,
+    ChronologyEvent,
     Brief,
     ContinuityEvent,
     DocumentSpec,
@@ -523,6 +524,7 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, st
         "doses.json": export_doses(library),
         "documents.json": export_documents(library),
         "chronicle.json": export_chronicle(library),
+        "chronology.json": export_chronology(library),
     }
     hashes: dict[str, str] = {}
     for name, data in parsed.items():
@@ -567,6 +569,24 @@ def export_chronicle(library: Path) -> list:
     for path in sorted(library.glob("17_*.md")):
         return realcanon.parse_chronicle(path)
     return []
+
+
+CHRONOLOGY_DOC_GLOB = "12_*.md"
+
+
+def export_chronology(library: Path) -> list[ChronologyEvent]:
+    """Генеральная хронология фабулы 12 (позвоночник цикла: события Ф-19xx-NN, тома, главы).
+    Документа может не быть (демо) — пустой список."""
+    for path in sorted(library.glob(CHRONOLOGY_DOC_GLOB)):
+        return realcanon.parse_chronology(path)
+    return []
+
+
+def load_chronology(exports_dir: Path) -> list[ChronologyEvent]:
+    try:
+        return [ChronologyEvent.model_validate(r) for r in load_export(exports_dir, "chronology.json")]
+    except FileNotFoundError:
+        return []
 
 
 def load_chronicle(exports_dir: Path) -> list[ChronicleEvent]:

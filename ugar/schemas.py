@@ -33,6 +33,31 @@ class ChronicleEvent(BaseModel):
     month: int | None = None  # для среза «месяц главы ± 1»
 
 
+class ChronologyEvent(BaseModel):
+    """Строка chronology.json — генеральная хронология фабулы 12 («документ-позвоночник» цикла).
+
+    Формат строки канона: `**Ф-ГОД-№** · дата · событие · участники · [видимость] · хвост`.
+    Видимость: `[Читатель: т.N гл.M]` — где читатель узнаёт; `[Скрыто]`; `[Фон]`."""
+
+    event_id: str                 # «Ф-1926-02»
+    year: int | None = None       # год из идентификатора
+    date: str = ""                # «15.04», «май 1913», «≈1921–24»
+    event: str = ""
+    participants: str = ""
+    visibility: str = ""          # «[Читатель: т.1 гл.32]» целиком
+    volumes: list[int] = Field(default_factory=list)   # тома из видимости
+    chapters: list[int] = Field(default_factory=list)  # главы из видимости
+    volume: int | None = None     # том раздела документа («## Том 2 — 1927 «Джентльмен»»)
+    section: str = ""             # заголовок раздела
+    section_years: list[int] = Field(default_factory=list)  # годы раздела («1946–1947» → [1946, 1947])
+    historical: bool = False      # «(ист.)» — обязательна сверка с хроникой
+    hidden: bool = False          # «[Скрыто]»
+    background: bool = False      # «[Фон]»
+    open_question: bool = False   # «⚠» — открытое решение автора
+    note: str = ""                # хвост после видимости («Закладка → т.6», «(Р-007)»)
+    line: int = 0                 # строка документа 12 (для находок линтера)
+
+
 class MatrixFact(BaseModel):
     """Строка matrix.json — из 31. from_chapter=None → субъект НЕ знает."""
 
