@@ -23,7 +23,8 @@ from pathlib import Path
 from . import mdparse
 from .mdparse import MarkupError, cell
 from .schemas import (
-    Act, Brief, ChronicleEvent, CircleStep, ContinuityEvent, DocumentSpec, Dose, Dossier, InfoBan, MatrixFact,
+    Act, Brief, ChronicleEvent, ChronologyEvent, CircleStep, ContinuityEvent, DocumentSpec, Dose, Dossier,
+    InfoBan, MatrixFact,
     Norm, Plant, Scene,
     StopRule, StoryCircle,
 )
@@ -312,6 +313,86 @@ def parse_chronicle(path: Path) -> list[ChronicleEvent]:
                 continue
             status = cell(row, "Статус") or "✓"
             out.append(ChronicleEvent(date=date, event=event, status=status, month=_chronicle_month(date)))
+    return out
+
+
+# ------------------------------------------------- генеральная хронология 12
+
+# «**Ф-1926-02** · 15.04 · событие · участники · [Читатель: гл.3, 6] · Закладка → т.6»
+CHRONOLOGY_RE = re.compile(r"^\*\*(Ф-(\d{4})-(\d+))\*\*\s*·\s*(.+)$")
+# «## Цикл I. Том 1 — 1926 (детализация…)», «## Том 11 — 1946–1947»
+CHRONOLOGY_VOL_RE = re.compile(r"Том\s*(\d+)\s*[—–-]\s*(\d{4})(?:\s*[–-]\s*(\d{4}))?")
+_VIS_VOL_RE = re.compile(r"т\.\s*(\d+)(?:\s*[–-]\s*(\d+))?", re.IGNORECASE)
+# «гл.3, 6», «гл.31–32», «гл. 45–46» — перечисление и диапазон после одного «гл.»
+_VIS_CH_RE = re.compile(r"гл\.?\s*(\d+(?:\s*[,–-]\s*\d+)*)", re.IGNORECASE)
+
+
+def _span(m: re.Match) -> list[int]:
+    lo = int(m.group(1))
+    hi = int(m.group(2)) if m.group(2) else lo
+    return list(range(lo, hi + 1)) if 0 < hi - lo < 50 else [lo, hi] if hi != lo else [lo]
+
+
+def _numbers(text: str) -> list[int]:
+    """«3, 6» → [3, 6]; «31–32» → [31, 32]; «45–46» → [45, 46]."""
+    out: list[int] = []
+    for part in text.split(","):
+        edges = [int(x) for x in re.findall(r"\d+", part)]
+        if len(edges) == 2 and 0 < edges[1] - edges[0] < 50:
+            out.extend(range(edges[0], edges[1] + 1))
+        else:
+            out.extend(edges)
+    return out
+
+
+def parse_chronology(path: Path) -> list[ChronologyEvent]:
+    """Генеральная хронология фабулы 12: строки «**Ф-ГОД-№** · дата · событие · [участники] ·
+    [видимость] · [хвост]», сгруппированные разделами «## Том N — ГОД».
+
+    Поле видимости узнаётся по «[»: всё до него после даты — событие и участники, всё после —
+    хвост (закладки, «(Р-007)»). Тома и главы видимости разбираются в `volumes`/`chapters`,
+    том и годы раздела — в `volume`/`section_years` (единственная в каноне карта «том → год»)."""
+    out: list[ChronologyEvent] = []
+    section = ""
+    volume: int | None = None
+    years: list[int] = []
+    for i, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if line.startswith("##"):
+            section = line.lstrip("#").strip()
+            vm = CHRONOLOGY_VOL_RE.search(section)
+            volume = int(vm.group(1)) if vm else None
+            years = [int(vm.group(2))] + ([int(vm.group(3))] if vm and vm.group(3) else []) if vm else []
+            continue
+        m = CHRONOLOGY_RE.match(line)
+        if not m:
+            continue
+        fields = [f.strip() for f in m.group(4).split("·")]
+        # у фоновых исторических строк поля даты нет вовсе: «**Ф-1927-01** · (ист.) Крах «Треста»… · [Фон]»
+        dated = bool(fields) and len(fields[0]) <= 30 and not fields[0].startswith("(ист")
+        date = fields[0] if dated else ""
+        rest = fields[1:] if dated else fields
+        vis_at = next((k for k, f in enumerate(rest) if f.startswith("[")), None)
+        if vis_at is None:
+            event, participants, visibility, note = " · ".join(rest), "", "", ""
+        else:
+            event = rest[0] if vis_at > 0 else ""
+            participants = " · ".join(rest[1:vis_at])
+            visibility = rest[vis_at]
+            note = " · ".join(rest[vis_at + 1:])
+        volumes: list[int] = []
+        chapters: list[int] = []
+        for vm2 in _VIS_VOL_RE.finditer(visibility):
+            volumes.extend(_span(vm2))
+        for cm in _VIS_CH_RE.finditer(visibility):
+            chapters.extend(_numbers(cm.group(1)))
+        out.append(ChronologyEvent(
+            event_id=m.group(1), year=int(m.group(2)), date=date, event=event, participants=participants,
+            visibility=visibility, volumes=sorted(set(volumes)), chapters=sorted(set(chapters)),
+            volume=volume, section=section, section_years=years,
+            historical="(ист" in line, hidden="[Скрыто" in visibility, background="[Фон" in visibility,
+            open_question="⚠" in line, note=note, line=i,
+        ))
     return out
 
 

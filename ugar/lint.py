@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from . import adapters, exporter, guard, llmjson, realcanon, verifier1
+from . import adapters, exporter, guard, lint_canon, llmjson, realcanon, verifier1
 from .config import Config
 from .mdparse import MarkupError
 from .paths import Workspace
@@ -574,6 +574,7 @@ def run_lint(library: Path, exports_dir: Path, logs_dir: Path, export: bool = Tr
     findings += check_circles(circles, acts, briefs, library)
     findings += check_prose(library, briefs, infobans, stoplists)
     findings += check_accepted_prose(library, exports_dir, briefs)
+    findings += lint_canon.run_checks(library, exports_dir, briefs, parts, continuity, known, reg, volume)
     return _finish(findings, logs_dir, files=len(_library_docs(library)))
 
 
