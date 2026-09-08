@@ -219,7 +219,8 @@ def test_поглавник_документы_и_поле_входит_выхо
     realcanon.enrich_from_poglavnik([brief], p23, {"Степан", "Куратор ОГПУ", "Куратор"})
     assert brief.documents == ["№1 (после главы): первый рапорт — чистый канцелярит."]
     assert brief.scenes == ["Явочная комната, вечер · Степан, куратор ОГПУ · вербовка · входит: тревога; выходит: согласие"]
-    assert brief.beats == ["кладём: механика рапорта."]
+    assert brief.beats == []  # «кладём» — закладки сцены, не биты (аудит 2, 1.10)
+    assert brief.scene_cards[0].plants == ["механика рапорта"]
     assert brief.participants == ["Куратор ОГПУ"]
 
 

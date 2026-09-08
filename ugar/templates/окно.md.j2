@@ -75,9 +75,13 @@
 Это инструкции автора, НЕ знание фокала. Вплети незаметно, без объяснений в тексте:
 {% for p in plants -%}
 - [{{ p.plant_id }}] {{ p.what }}
-{% else -%}
+{% endfor -%}
+{% for sp in scene_plants -%}
+- {{ sp }}
+{% endfor -%}
+{% if not plants and not scene_plants -%}
 - (закладок в этой главе нет)
-{% endfor %}
+{% endif %}
 
 <!-- СЕКЦИЯ: бриф -->
 ## Бриф главы {{ brief.chapter }}
@@ -87,7 +91,7 @@
 - Объём: {% if brief.volume_words %}{{ brief.volume_words }} слов{% elif volume_norm %}{{ volume_norm.min | int }}–{{ volume_norm.max | int }} слов{% else %}по сценам{% endif %}
 
 ### Сцены
-{% for s in brief.scenes -%}
+{% for s in scene_lines -%}
 - {{ s }}
 {% endfor %}
 

@@ -12,9 +12,9 @@ from pathlib import Path
 
 from jinja2 import Environment, StrictUndefined
 
-from . import circles, exporter, guard, mdparse
+from . import circles, exporter, guard, mdparse, realcanon
 from .paths import Workspace
-from .schemas import Brief, StopRule
+from .schemas import Brief, Scene, StopRule
 
 SECTION_RE = re.compile(r"<!-- СЕКЦИЯ: (.+?) -->")
 
@@ -152,13 +152,81 @@ def _safe_sentences(text: str, markers: list[str], volume: int) -> str:
     return " ".join(kept)
 
 
-def safe_dossier(d, brief: Brief, infobans: list, participants: list[str]):
-    """Проекция досье для окна (FR-C3, Р-022): без каркаса/арки/статуса, без фраз о тайнах,
-    которых фокал не знает к этой главе, без будущих томов; отношения — только к участникам сцены."""
+def secret_markers(infobans: list, brief: Brief) -> list[str]:
+    """Маркеры тайн реестра, которых фокал главы ещё не знает (Р-022) — фразы с ними в окно не идут."""
     markers: list[str] = []
     for b in infobans:
         if b.secret and not b.known_to(brief.focal, brief.chapter):
             markers.extend(b.markers)
+    return markers
+
+
+# клаузы поглавника, адресованные читателю/инструменту, а не Писателю (аудит 2, 1.10): «читатель знает…»,
+# «саспенс читателя», «(матрица №17)», «→ т.6», «ЗАКЛАДКА → т.6», «⚠», «реш. при прозе», «(эхо в гл. 5)»,
+# «улика слоя 1 №3», «арка-парабола …» — клауза (между «;» или в скобках) с маркером убирается целиком
+_READER_MARK_RE = re.compile(
+    r"читател|саспенс|матриц[аы]\s*№|→\s*т\.\s*\d|закладка\s*→|[⚠🔧]|реш\.\s*при\s*прозе|эхо\s+в\s+гл|"
+    r"улика\s+слоя\s+\d|арка-парабол",
+    re.IGNORECASE,
+)
+_INNER_PAREN_RE = re.compile(r"\s*\([^()]*\)")
+
+
+def _clause_bad(chunk: str, low_markers: list[str], volume: int) -> bool:
+    low = chunk.lower()
+    if _READER_MARK_RE.search(chunk) or any(m in low for m in low_markers):
+        return True
+    for m in _FUTURE_RE.finditer(chunk):
+        num = next((g for g in m.groups() if g), None)
+        if num is None or int(num) > volume:
+            return True
+    return False
+
+
+def strip_reader_clauses(text: str, markers: list[str] = (), volume: int = 1) -> str:
+    """Вычищает из текста поглавника клаузы не для Писателя: скобочные группы изнутри наружу, затем
+    элементы через «;» верхнего уровня; клауза с маркером читателя/инструмента, с маркером тайны, которой
+    фокал не знает, или со ссылкой на будущий том убирается целиком (FR-C3)."""
+    low_markers = [m.lower() for m in markers if m]
+    kept: list[str] = []
+
+    def _paren(m: re.Match) -> str:
+        if _clause_bad(m.group(), low_markers, volume):
+            return ""
+        kept.append(m.group())
+        return f"\x00{len(kept) - 1}\x00"
+
+    prev = None
+    while prev != text:
+        prev, text = text, _INNER_PAREN_RE.sub(_paren, text)
+    items = [it for it in realcanon._split_items(text) if not _clause_bad(it, low_markers, volume)]
+    out = "; ".join(items)
+    while "\x00" in out:  # вложенные чистые скобки восстанавливаются снаружи внутрь
+        out = re.sub(r"\x00(\d+)\x00", lambda m: kept[int(m.group(1))], out)
+    return re.sub(r"\s{2,}", " ", out).strip(" ;,—–-")
+
+
+def scene_for_window(scene: Scene, markers: list[str], volume: int) -> Scene:
+    """Карточка сцены, как её видит Писатель: все поля через `strip_reader_clauses`."""
+    f = lambda t: strip_reader_clauses(t, markers, volume)  # noqa: E731
+    return scene.model_copy(update={
+        "place": f(scene.place), "time": f(scene.time), "participants": f(scene.participants),
+        "goal": f(scene.goal), "enters": f(scene.enters), "exits": f(scene.exits),
+        "plants": [p for p in (f(x) for x in scene.plants) if p],
+    })
+
+
+def scene_line(sc: Scene) -> str:
+    """«**Сц. 5.1** · место · время · участники · цель · входит: … · выходит: …» (пустые поля опускаются)."""
+    fields = [sc.place, sc.time, sc.participants, sc.goal,
+              f"входит: {sc.enters}" if sc.enters else "", f"выходит: {sc.exits}" if sc.exits else ""]
+    return " · ".join([f"**Сц. {sc.number}**", *[x for x in fields if x]])
+
+
+def safe_dossier(d, brief: Brief, infobans: list, participants: list[str]):
+    """Проекция досье для окна (FR-C3, Р-022): без каркаса/арки/статуса, без фраз о тайнах,
+    которых фокал не знает к этой главе, без будущих томов; отношения — только к участникам сцены."""
+    markers = secret_markers(infobans, brief)
     relations = {
         k: _safe_sentences(v, markers, brief.volume)
         for k, v in d.relations.items()
@@ -247,6 +315,13 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
     except FileNotFoundError:
         drama = circles.frame_for_chapter([], [], chapter)
 
+    # карточки сцен поглавника (аудит 2, 1.10): клаузы для читателя/инструмента вырезаны;
+    # «кладём» сцен — в техзадание закладок, не в биты; без карточек — строки сцен как есть
+    markers = secret_markers(infobans, brief)
+    cards = [scene_for_window(sc, markers, brief.volume) for sc in brief.scene_cards]
+    scene_lines = [scene_line(sc) for sc in cards] or list(brief.scenes)
+    scene_plants = [f"сц. {sc.number}: {p}" for sc in cards for p in sc.plants]
+
     env = Environment(undefined=StrictUndefined, trim_blocks=False, lstrip_blocks=False)
     window = env.from_string(_template_text(ws)).render(
         brief=brief,
@@ -258,6 +333,8 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
         known_facts=known,
         not_knows=not_knows,
         plants=chapter_plants(exports_dir, brief),
+        scene_lines=scene_lines,
+        scene_plants=scene_plants,
         bans=bans,
         intensifiers=intensifiers,
         volume_norm=norms.get("объём_главы"),

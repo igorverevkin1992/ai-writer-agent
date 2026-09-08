@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import mdparse
 from .mdparse import MarkupError, cell
-from .schemas import Act, Brief, CircleStep, ContinuityEvent, Dossier, InfoBan, MatrixFact, Norm, Plant, StopRule, StoryCircle
+from .schemas import Act, Brief, CircleStep, ContinuityEvent, Dossier, InfoBan, MatrixFact, Norm, Plant, Scene, StopRule, StoryCircle
 
 CH_RE = re.compile(r"[Гг]л\.?\s*(\d+)")
 # перечисление глав после одного «гл.»: «Гл. 9, 27», «Гл. 29 или 40», «гл. 34, 40»
@@ -304,16 +304,78 @@ def parse_registry_briefs(path: Path, known_names: set[str] | None = None) -> li
 
 
 POGLAVNIK_HEAD_RE = re.compile(r"##\s*Гл\.?\s*(\d+)\s*·\s*([^·]+)·\s*фокал\s+([А-ЯЁ]+)", re.IGNORECASE)
-SCENE_RE = re.compile(r"\*\*Сц\.\s*[\d.]+\.?\*\*\s*(.+)")
+SCENE_RE = re.compile(r"\*\*Сц\.\s*([\d.]*?\d)\.?\*\*\s*(.+)")
 # «**→ ДОКУМЕНТ №1** (после главы): первый рапорт — …» → документ-вставка главы (аудит 3.6)
 DOCUMENT_RE = re.compile(r"\*\*→\s*ДОКУМЕНТ\s*№?\s*(\d+)\*\*\s*(?:\(([^)]*)\))?\s*:?\s*(.*)")
+# строки главы после сцен: «**Запреты.** …; …» и «**Не знает.** …; …» (аудит 2, 1.8)
+CHAPTER_FIELD_RE = re.compile(r"\*\*(Запреты|НЕ знает|Не знает)\.?\*\*\s*(.+)", re.IGNORECASE)
+# время сцены — хвост поля «место» после запятой: «…, за полночь», «…, утро»
+SCENE_TIME_RE = re.compile(
+    r",\s*([^,]*\b(?:утро|утром|вечер|вечером|ночь|ночью|за полночь|день|днём|рассвет|полдень|сумерки)\b[^,]*)$",
+    re.IGNORECASE,
+)
+_PLANTS_RE = re.compile(r"(?:^|[;·])\s*кладём:\s*", re.IGNORECASE)
+_ENTERS_RE = re.compile(r"(?:^|[;·])\s*входит:\s*")
+_EXITS_RE = re.compile(r"(?:^|[;·])\s*выходит(?:\s+[^:;·]*)?:\s*")
+
+
+def _split_items(text: str) -> list[str]:
+    """«а; б (в; г); д.» → [«а», «б (в; г)», «д»] — «;» внутри скобок не делит."""
+    items, depth, buf = [], 0, []
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if ch == ";" and depth == 0:
+            items.append("".join(buf)); buf = []
+        else:
+            buf.append(ch)
+    items.append("".join(buf))
+    return [it.strip(" .\t") for it in items if it.strip(" .\t")]
+
+
+def parse_scene(number: str, text: str) -> Scene:
+    """Строка сцены поглавника → карточка: место · участники · цель [· …] · входит: …; выходит: … · кладём: …
+
+    «входит:»/«выходит:» находятся и внутри поля цели (гл. 6.1: «…; выходит: …»); всё, что стоит
+    между участниками и «входит/выходит», — цель (дополнительные поля через «·» приклеиваются к ней);
+    «кладём: …» — элементы через «;» (скобки не делят)."""
+    # «кладём: …» — хвост строки (стоит и после «·», и после «;» — гл. 7.1); всё после него — закладки
+    km = _PLANTS_RE.search(text)
+    plants = _split_items(text[km.end():]) if km else []
+    fields = [p.strip() for p in (text[: km.start()] if km else text).split("·")]
+    fields = [f for f in fields if f]
+    place = fields[0] if fields else ""
+    time = ""
+    tm = SCENE_TIME_RE.search(place)
+    if tm:
+        time, place = tm.group(1).strip(), place[: tm.start()].strip()
+    participants = fields[1] if len(fields) > 1 else ""
+    rest = " · ".join(fields[2:]).strip()
+    m_in, m_out = _ENTERS_RE.search(rest), _EXITS_RE.search(rest)
+    cut = min(m.start() for m in (m_in, m_out) if m) if (m_in or m_out) else len(rest)
+    goal = rest[:cut].strip(" ·;")
+    enters = exits = ""
+    if m_in:
+        stop = m_out.start() if m_out and m_out.start() > m_in.start() else len(rest)
+        enters = rest[m_in.end(): stop].strip(" ·;.")
+    if m_out:
+        stop = m_in.start() if m_in and m_in.start() > m_out.start() else len(rest)
+        exits = rest[m_out.end(): stop].strip(" ·;.")
+    return Scene(
+        number=number, place=place.rstrip(" ."), time=time, participants=participants.rstrip(" ."),
+        goal=goal.rstrip(" ."), enters=enters, exits=exits, plants=plants,
+    )
 
 
 def enrich_from_poglavnik(briefs: list[Brief], path: Path, known_names: set[str]) -> None:
-    """Обогащение брифов сценами, участниками и документами-вставками из рабочего поглавника (23).
+    """Обогащение брифов сценами, участниками, документами-вставками и полями «Запреты»/«Не знает»
+    из рабочего поглавника (23).
 
-    Сцена: место · участники · цель · входит/выходит · кладём — в бриф идут все поля,
-    кроме «кладём: …» (это биты); «входит:/выходит:» остаётся в строке сцены."""
+    Сцена → `scene_cards` (структурно) и `scenes` (строка без «кладём: …» — совместимость);
+    «кладём: …» — в `Scene.plants`, в биты НЕ идёт (аудит 2, 1.10). Строки главы
+    «**Запреты.** …; …» / «**Не знает.** …; …» → `bans` / `not_knows` (аудит 2, 1.8)."""
     by_ch = {b.chapter: b for b in briefs}
     current: Brief | None = None
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -321,23 +383,27 @@ def enrich_from_poglavnik(briefs: list[Brief], path: Path, known_names: set[str]
         if m:
             current = by_ch.get(int(m.group(1)))
             continue
+        if current is None:
+            continue
         dm = DOCUMENT_RE.match(line.strip())
-        if dm and current is not None:
+        if dm:
             position = (dm.group(2) or "после главы").strip()
             current.documents.append(f"№{dm.group(1)} ({position}): {dm.group(3).strip()}")
             continue
+        fm = CHAPTER_FIELD_RE.match(line.strip())
+        if fm:
+            target = current.bans if fm.group(1).lower() == "запреты" else current.not_knows
+            target.extend(_split_items(fm.group(2)))
+            continue
         sm = SCENE_RE.match(line.strip())
-        if sm and current is not None:
-            scene = sm.group(1)
-            parts = [p.strip() for p in scene.split("·")]
+        if sm:
+            scene = parse_scene(sm.group(1), sm.group(2))
+            current.scene_cards.append(scene)
+            parts = [p.strip() for p in sm.group(2).split("·")]
             current.scenes.append(" · ".join(p for p in parts if not p.lower().startswith("кладём")))
-            participants = find_names(parts[1], known_names) if len(parts) > 1 else []
-            for name in participants:
+            for name in find_names(scene.participants, known_names):
                 if name not in current.participants and name != current.focal:
                     current.participants.append(name)
-            for chunk in parts:
-                if chunk.lower().startswith("кладём"):
-                    current.beats.append(chunk)
 
 
 # ------------------------------------------------------------- матрица 31

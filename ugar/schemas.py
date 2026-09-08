@@ -65,6 +65,22 @@ class ContinuityEvent(BaseModel):
     note: str = ""
 
 
+class Scene(BaseModel):
+    """Карточка сцены поглавника (23): место · участники · цель · входит/выходит · кладём.
+
+    Поля хранятся как в поглавнике (без фильтра): что из них видит Писатель, решает компилятор
+    (клаузы, адресованные читателю/инструменту, в окно не выводятся — FR-C3)."""
+
+    number: str = ""        # «5.1»
+    place: str = ""
+    time: str = ""          # «за полночь», «утро» — вынесено из места
+    participants: str = ""  # строка как в поглавнике («Степан; Лемм (появление в финале)»)
+    goal: str = ""
+    enters: str = ""        # чем входит фокал
+    exits: str = ""         # чем выходит фокал
+    plants: list[str] = Field(default_factory=list)  # «кладём: …» по элементам через «;»
+
+
 class Brief(BaseModel):
     """Глава поглавника (briefs.json — из 23)."""
 
@@ -73,7 +89,8 @@ class Brief(BaseModel):
     date: str = ""
     year: int | None = None
     focal: str = ""
-    scenes: list[str] = Field(default_factory=list)
+    scenes: list[str] = Field(default_factory=list)          # строки сцен (совместимость панели/Э2)
+    scene_cards: list[Scene] = Field(default_factory=list)   # структурные карточки сцен (23)
     participants: list[str] = Field(default_factory=list)  # персонажи сцен главы
     beats: list[str] = Field(default_factory=list)
     bans: list[str] = Field(default_factory=list)       # запреты
