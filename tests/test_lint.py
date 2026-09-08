@@ -176,15 +176,16 @@ def test_панель_канон_чтение_правка_и_линт(panel, ws
 
     # правка с противоречием → сохранение проходит (файл автора), линт подсвечивает ошибку
     text = doc["text"].replace("- Дата: 12 июня 1995", "- Дата: 12 июля 1995")
-    status, r = _post(f"{base}/api/canon/doc", {"path": "23_Поглавник_Том1.md", "text": text, "mtime": doc["mtime"]})
-    assert status == 200, r
+    status, r = _post(f"{base}/api/canon/doc", {"path": "23_Поглавник_Том1.md", "text": text, "version": doc["version"]})
+    assert status == 200, r and r["version"] != doc["version"]
     assert "12 июля" in (library / "23_Поглавник_Том1.md").read_text(encoding="utf-8")
     assert r["lint"]["errors"] >= 1
     status, l = _get(f"{base}/api/lint")
     assert status == 200 and any(f["code"] == "ХРОН-2" for f in l["report"]["findings"])
-    # устаревший mtime — конфликт
-    status, r = _post(f"{base}/api/canon/doc", {"path": "23_Поглавник_Том1.md", "text": text, "mtime": doc["mtime"]})
+    # устаревшая версия — конфликт (версия = хэш содержимого: переживает JSON/JavaScript, в отличие от mtime_ns)
+    status, r = _post(f"{base}/api/canon/doc", {"path": "23_Поглавник_Том1.md", "text": text, "version": doc["version"]})
     assert status == 400 and "изменён на диске" in r["error"]
+    assert isinstance(doc["version"], str) and len(doc["version"]) == 64
     # сводка в состоянии панели
     status, st = _get(f"{base}/api/state")
     assert st["lint"]["errors"] >= 1
@@ -194,16 +195,15 @@ def test_панель_применяет_исправление(panel, ws, libra
     base, api = panel
     p = library / "Досье" / "Персонаж_Зоя.md"
     line = next(i for i, l in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if "24 года" in l)
-    api.run_lint_now()
-    api.lint_report.findings.append(LintFinding(
-        code="ТЕСТ", severity="заметка", file="Досье/Персонаж_Зоя.md", line=line, message="возраст",
-        fix=LintFix(file="Досье/Персонаж_Зоя.md", line=line, old="24 года", new="25 лет", note="тест"),
-    ))
-    idx = len(api.lint_report.findings) - 1
-    status, r = _post(f"{base}/api/lint/fix", {"index": idx})
+    fix = {"file": "Досье/Персонаж_Зоя.md", "line": line, "old": "24 года", "new": "25 лет", "note": "тест"}
+    status, r = _post(f"{base}/api/lint/fix", {"fix": fix})  # ровно то, что автор видел и подтвердил
     assert status == 200, r
     assert "25 лет" in p.read_text(encoding="utf-8")
-    status, r = _post(f"{base}/api/lint/fix", {"index": 999})
+    status, r = _post(f"{base}/api/lint/fix", {"fix": fix})  # строка уже другая — устаревшее исправление отвергается
+    assert status == 400 and "изменилась" in r["error"]
+    status, r = _post(f"{base}/api/lint/fix", {"index": 0})
+    assert status == 400
+    status, r = _post(f"{base}/api/lint/fix", {"fix": {"file": "../config.yaml", "line": 1, "old": "x", "new": "y"}})
     assert status == 400
 
 

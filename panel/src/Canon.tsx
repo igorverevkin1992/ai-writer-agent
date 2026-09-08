@@ -20,7 +20,7 @@ export function Canon(props: {
 }) {
   const { busy: jobBusy, runCommand, notify, confirm, refreshTick } = props;
   const [docs, setDocs] = useState<CanonDoc[]>([]);
-  const [current, setCurrent] = useState<{ path: string; text: string; mtime: number } | null>(null);
+  const [current, setCurrent] = useState<{ path: string; text: string; version: string } | null>(null);
   const [draft, setDraft] = useState("");
   const [lint, setLint] = useState<LintData | null>(null);
   const [filter, setFilter] = useState("");
@@ -46,9 +46,14 @@ export function Canon(props: {
   const open = useCallback(
     (path: string, line?: number) =>
       run(async () => {
+        if (current && current.path === path) {
+          // тот же документ: переход по строке в текущем буфере, правки не трогаем
+          if (line) jumpTo(draft, line);
+          return;
+        }
         if (dirty && !(await confirm(`В «${current?.path}» есть несохранённые правки. Открыть другой документ и потерять их?`))) return;
         try {
-          const d = await apiGet<{ path: string; text: string; mtime: number }>(`/api/canon/doc?path=${encodeURIComponent(path)}`);
+          const d = await apiGet<{ path: string; text: string; version: string }>(`/api/canon/doc?path=${encodeURIComponent(path)}`);
           setCurrent(d);
           setDraft(d.text);
           if (line) window.setTimeout(() => jumpTo(d.text, line), 50);
@@ -56,7 +61,7 @@ export function Canon(props: {
           notify(String(e));
         }
       }),
-    [run, dirty, current, confirm, notify],
+    [run, dirty, current, draft, confirm, notify],
   );
 
   const jumpTo = (text: string, line: number) => {
@@ -80,10 +85,12 @@ export function Canon(props: {
       );
       if (!ok) return;
       try {
-        const r = await apiPost<{ saved: string; mtime: number; lint: LintReport | null }>("/api/canon/doc", {
-          path: current.path, text: draft, mtime: current.mtime,
+        const r = await apiPost<{ saved: string; version: string; lint: LintReport | null }>("/api/canon/doc", {
+          path: current.path, text: draft, version: current.version,
         });
-        setCurrent({ path: current.path, text: draft, mtime: r.mtime });
+        const saved = draft.endsWith("\n") ? draft : draft + "\n"; // сервер дописывает перевод строки
+        setCurrent({ path: current.path, text: saved, version: r.version });
+        setDraft(saved);
         notify(`Сохранено: ${r.saved}`, "ok");
         loadLint();
         loadDocs();
@@ -92,17 +99,17 @@ export function Canon(props: {
       }
     });
 
-  const applyFix = (index: number, f: LintFinding) =>
+  const applyFix = (f: LintFinding) =>
     run(async () => {
       if (!f.fix) return;
       const ok = await confirm(`Применить исправление в ${f.fix.file}:${f.fix.line}?\n«${f.fix.old}» → «${f.fix.new}»\n(${f.fix.note || "механическая правка"}; запись в библиотеку канона, Д-8)`);
       if (!ok) return;
       try {
-        await apiPost("/api/lint/fix", { index });
+        await apiPost("/api/lint/fix", { fix: f.fix }); // ровно то, что автор подтвердил
         notify("Исправление применено — канон перепроверен.", "ok");
         loadLint();
         if (current && current.path === f.fix.file) {
-          const d = await apiGet<{ path: string; text: string; mtime: number }>(`/api/canon/doc?path=${encodeURIComponent(current.path)}`);
+          const d = await apiGet<{ path: string; text: string; version: string }>(`/api/canon/doc?path=${encodeURIComponent(current.path)}`);
           setCurrent(d); setDraft(d.text);
         }
       } catch (e) {
@@ -217,7 +224,7 @@ export function Canon(props: {
           {f.fix && (
             <div className="resolvebtns">
               <span className="muted">«{f.fix.old}» → «{f.fix.new}»</span>
-              <button disabled={busy} onClick={() => applyFix(index, f)}>Применить исправление</button>
+              <button disabled={busy} onClick={() => applyFix(f)}>Применить исправление</button>
             </div>
           )}
         </div>

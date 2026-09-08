@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import re
@@ -26,6 +27,7 @@ from importlib import resources
 from pathlib import Path
 
 import typer
+from pydantic import ValidationError
 
 from . import exporter, guard, review, timing, verifier2
 from .config import Config
@@ -527,33 +529,44 @@ class PanelAPI:
                          "mtime": st.st_mtime_ns, "size": st.st_size})
         return {"docs": docs}
 
+    @staticmethod
+    def _version(text: str) -> str:
+        """Версия документа для оптимистичной блокировки — хэш содержимого, а не mtime:
+        наносекунды mtime не переживают JSON/JavaScript (double, 2⁵³) и шаг времени FAT/NTFS."""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
     def canon_doc(self, rel: str) -> dict:
         path = self._canon_path(rel)
         if not path.exists():
             raise FileNotFoundError(f"нет документа {rel}")
-        return {"path": rel, "text": path.read_text(encoding="utf-8"), "mtime": path.stat().st_mtime_ns}
+        text = path.read_text(encoding="utf-8")
+        return {"path": rel, "text": text, "version": self._version(text), "mtime": path.stat().st_mtime_ns}
 
-    def save_canon_doc(self, rel: str, text: str, mtime: int | None) -> dict:
-        """Правка канона автором из панели (сценарий Б): подтверждение дано диалогом, запись — в сессии канониста."""
+    def save_canon_doc(self, rel: str, text: str, version: str | None) -> dict:
+        """Правка канона автором из панели (сценарий Б): подтверждение дано диалогом, запись — в сессии канониста.
+        `version` — хэш содержимого, которое автор открыл; расхождение = документ изменён на диске."""
         path = self._canon_path(rel)
-        if mtime is not None and path.exists() and path.stat().st_mtime_ns != mtime:
-            raise RuntimeError("документ изменён на диске после открытия — перечитайте его, чтобы не затереть чужую правку")
+        text = text if text.endswith("\n") else text + "\n"
         with self.jobs.exclusive():
+            if version is not None and path.exists() and self._version(path.read_text(encoding="utf-8")) != version:
+                raise RuntimeError("документ изменён на диске после открытия — перечитайте его, чтобы не затереть чужую правку")
             with guard.canon_write_session():
-                guard.write_text(path, text if text.endswith("\n") else text + "\n")
+                guard.write_text(path, text)
         self.watcher._snapshot = self.watcher._scan()  # своя запись — не «внешнее» изменение
         self.lint_changed = [rel]
         self.run_lint_now()
-        return {"saved": rel, "mtime": path.stat().st_mtime_ns, "lint": self.lint_summary()}
+        return {"saved": rel, "version": self._version(text), "mtime": path.stat().st_mtime_ns, "lint": self.lint_summary()}
 
-    def apply_lint_fix(self, index: int) -> dict:
+    def apply_lint_fix(self, fix_data: dict) -> dict:
+        """Применяет ровно то исправление, которое автор видел и подтвердил (file/line/old/new),
+        а не элемент списка по индексу — отчёт мог перестроиться наблюдателем между показом и кликом."""
         from . import lint as lint_mod
+        from .schemas import LintFix
 
-        if not self.lint_report or not (0 <= index < len(self.lint_report.findings)):
-            raise ValueError("нет такой находки — перепроверьте канон")
-        fix = self.lint_report.findings[index].fix
-        if fix is None:
-            raise ValueError("у этой находки нет механического исправления — правьте документ")
+        try:
+            fix = LintFix(**{k: fix_data[k] for k in ("file", "line", "old", "new", "note") if fix_data.get(k) is not None})
+        except (TypeError, ValidationError) as e:
+            raise ValueError(f"некорректное исправление: {e}") from None
         with self.jobs.exclusive():
             with guard.canon_write_session():
                 lint_mod.apply_fix(self.library, fix)
@@ -770,14 +783,14 @@ def make_handler(api: PanelAPI):
                 if m:
                     return self._json(api.save_prompt(int(m.group(1)), m.group(2)))
                 if path == "/api/canon/doc":
-                    mt = body.get("mtime")
+                    version = body.get("version")
                     return self._json(api.save_canon_doc(str(body.get("path", "")), str(body.get("text", "")),
-                                                         int(mt) if isinstance(mt, int) else None))
+                                                         str(version) if isinstance(version, str) else None))
                 if path == "/api/lint/fix":
-                    idx = body.get("index")
-                    if not isinstance(idx, int) or isinstance(idx, bool):
-                        raise ValueError("index: целое число")
-                    return self._json(api.apply_lint_fix(idx))
+                    fix = body.get("fix")
+                    if not isinstance(fix, dict):
+                        raise ValueError("нужно исправление {file, line, old, new}")
+                    return self._json(api.apply_lint_fix(fix))
                 if path == "/api/circles/manual":
                     return self._json(api.manual_circle(body.get("scope", ""), body.get("key"), str(body.get("text", ""))))
                 m = re.fullmatch(r"/api/chapter/(\d+)/manual-draft", path)
