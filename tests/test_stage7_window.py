@@ -140,3 +140,22 @@ def test_вкус_отдельный_совещательный_проход(rea
     review.build_review_pack(real, 5, 1)
     md = (real.chapter_dir(5) / "review.md").read_text(encoding="utf-8")
     assert "## Вкус (советы, не блокируют приёмку" in md and "V-001" in md
+
+
+@real_only
+def test_срез_досье_в_э2_без_тайн_недоступных_фокалу(real):
+    """Э2 знает список запретов (иначе не проверит утечку), но карточки участников приходят
+    в той же проекции, что в окне Писателя: без содержания тайн, неизвестных фокалу главы."""
+    import shutil
+
+    from ugar import exporter, verifier2
+
+    infobans = exporter.load_infobans(real.exports)
+    real.chapter_dir(5).mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(LIBRARY / "Проза" / "Том1_Глава05.md", real.draft_path(5, 1))
+    _, user = verifier2.build_prompt(real, 5, 1)
+    dossiers = user.split("## Досье участников сцены")[1].split("\n## ")[0].lower()
+    brief = exporter.load_brief(real.exports, 5)
+    hidden = [m.lower() for b in infobans if b.secret and not b.known_to(brief.focal, brief.chapter) for m in b.markers]
+    assert hidden, "у тайн должны быть маркеры (Р-022)"
+    assert [m for m in hidden if m in dossiers] == []
