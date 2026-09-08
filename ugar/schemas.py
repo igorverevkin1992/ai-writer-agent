@@ -85,12 +85,13 @@ class Brief(BaseModel):
 
 
 class Dossier(BaseModel):
-    """Досье персонажа для окна (FR-C1): профиль, физика, речевой паспорт, отношения."""
+    """Досье персонажа для окна (FR-C1): профиль, физика, речевой паспорт, опознавательный код, отношения."""
 
     name: str
     profile: str = ""
     physique: str = ""
     speech: str = ""
+    code: str = ""  # «Опознавательный код»: приметы, по которым персонажа опознают (перстень, перчатка…)
     relations: dict[str, str] = Field(default_factory=dict)
 
 

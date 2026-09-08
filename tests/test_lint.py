@@ -1,6 +1,7 @@
 """Линтер канона: проверки противоречий (демо и реальная библиотека), исправления, наблюдатель, API панели, CLI."""
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -117,6 +118,16 @@ def test_реальная_библиотека_без_ошибок():
     assert "ТАЙНА-1" in codes
     # возраст «гл. 41 т.1» больше не принимается за возраст (ложных ДОСЬЕ-1 нет)
     assert not any(f.code == "ДОСЬЕ-1" and "41" in f.message for f in report.findings)
+    # участники сцен без карточки досье и карточки без «Физики» — заметки для автора (аудит 7.6, 3.10)
+    notes = {f.code: [x.message for x in report.findings if x.code == f.code] for f in report.findings}
+    assert all(f.severity == "заметка" for f in report.findings if f.code in ("ПОГЛ-2", "ДОСЬЕ-6"))
+    who = {re.search(r"«([^»]+)»", m).group(1) for m in notes["ПОГЛ-2"]}
+    assert {"Куратор ОГПУ", "тело Клюева у сейфа", "Веры Холодовой", "поляк", "посредник", "оперативник"} <= who
+    assert not any(w.lower().startswith(("чекист", "резидент")) for w in who)  # «чекистской мистификации», резидент = Штерн
+    assert next(m for m in notes["ПОГЛ-2"] if "«поляк»" in m).endswith("(гл. 29, 31, 37, 40)")
+    no_physique = {m.split(":")[0] for m in notes["ДОСЬЕ-6"]}
+    assert {"РОМАН ЗАВАРЗИН", "АСЯ ГРИНБЕРГ", "ФРОЛ БУГАЕВ", "ОЛЬГА ЛЕММ"} <= no_physique and len(no_physique) == 7
+    assert not any(n.startswith(("АРИСТАРХ", "СТЕПАН", "АНДРЕЙ")) for n in no_physique)  # у Лемма, Степана, Штерна «Физика» есть
 
 
 # ------------------------------------------------------------- наблюдатель

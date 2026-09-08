@@ -318,25 +318,34 @@ def export_briefs(library: Path) -> list[Brief]:
             briefs = realcanon.parse_registry_briefs(reg, known)  # постраничная сетка на весь том
             for p23 in sorted(library.glob("23_*.md")):
                 realcanon.enrich_from_poglavnik(briefs, p23, known)
+            realcanon.enrich_from_dossiers(briefs, _real_dossier_paths(library), known)  # «Т.1: … гл. 41» в арке
     if not briefs:
         raise MarkupError(library / "23_*.md", 0, "поглавник не найден или в нём нет секций «## Глава N»")
     return briefs
 
 
+def _real_dossier_paths(library: Path) -> list[Path]:
+    """Файлы карточек фактического формата («# Досье 1.3: ИМЯ»)."""
+    return [p for p in sorted(library.glob("Досье/*.md")) if "# Досье" in p.read_text(encoding="utf-8")[:200]]
+
+
 def _known_names(library: Path) -> set[str]:
-    """Имена субъектов для распознавания участников сцен и досье."""
+    """Имена субъектов для распознавания участников сцен и досье: субъекты матрицы 3.1, линии 03
+    и имена всех карточек досье (аудит 1.6). Имя из нескольких слов («Куратор ОГПУ») — одно,
+    без дубля по первому слову: падежные формы и «куратор» без уточнения находит `find_names`."""
     try:
         names = {f.subject for f in export_matrix(library)}
     except MarkupError:
         names = set()
     for p03 in sorted(library.glob("03_*.md")):
         names |= realcanon.focal_names(p03)
-    return {n.split()[0] for n in names if n} | names
+    names = {n for n in names if n}
+    return names | realcanon.dossier_names(_real_dossier_paths(library), names)
 
 
 def export_dossiers(library: Path) -> list[Dossier]:
     paths = sorted(library.glob("Досье/*.md"))
-    real = [p for p in paths if "# Досье" in p.read_text(encoding="utf-8")[:200]]
+    real = _real_dossier_paths(library)
     if real:
         return realcanon.parse_dossiers_real(real, _known_names(library))
     dossiers = []
@@ -360,6 +369,7 @@ def export_dossiers(library: Path) -> list[Dossier]:
                 profile=body_of(r"Профил"),
                 physique=body_of(r"Физик"),
                 speech=body_of(r"Речев"),
+                code=body_of(r"Опознавательн"),
                 relations=rel,
             )
         )

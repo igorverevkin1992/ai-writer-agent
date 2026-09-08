@@ -69,15 +69,59 @@ def name_pattern(name: str) -> re.Pattern:
     return re.compile(pat, re.IGNORECASE)
 
 
+def _name_matches(text: str, known_names: set[str]) -> list[tuple[str, re.Match]]:
+    """Вхождения известных имён в тексте (по основе, без учёта регистра). Имя из нескольких слов
+    («Куратор ОГПУ») находится и по одному первому слову («к куратору»), если оно единственное
+    полное имя с таким началом; «Читатель» — не персонаж."""
+    out: list[tuple[str, re.Match]] = []
+    for n in known_names:
+        if n in _PSEUDO_SUBJECTS:
+            continue
+        found = list(name_pattern(n).finditer(text))
+        first = n.split()[0]
+        if not found and " " in n and sum(1 for o in known_names if o.split()[0] == first) == 1:
+            found = list(name_pattern(first).finditer(text))
+        out.extend((n, m) for m in found)
+    return out
+
+
 def find_names(text: str, known_names: set[str]) -> list[str]:
-    """Известные имена, встречающиеся в тексте (по основе, без учёта регистра); из пары
-    «Куратор» / «Куратор ОГПУ» остаётся более длинное, «Читатель» — не персонаж."""
-    found = {n for n in known_names if n not in _PSEUDO_SUBJECTS and name_pattern(n).search(text)}
+    """Известные имена, встречающиеся в тексте (в любом падеже и регистре); из пары
+    «Куратор» / «Куратор ОГПУ» остаётся более длинное."""
     result: set[str] = set()
-    for n in found:
-        # «куратор» без уточнения → единственное полное имя «Куратор ОГПУ» (субъект матрицы)
+    for n, _ in _name_matches(text, known_names):
         longer = [o for o in known_names if o != n and o.startswith(n + " ")]
         result.add(longer[0] if len(longer) == 1 else n)
+    return sorted(result)
+
+
+# имя — участник действия, если стоит в именительном падеже, после предлога совместного действия
+# («к Заварзину», «с Леммом», «на куратора», «за Леммом») или как дополнение глагола настоящего
+# времени — сетка написана в настоящем («ведёт Степана», «прикрывает Лемма»); родительный при
+# существительном («рапорт Степана», «стола Лемма») и дательный адресата («сказанная Степану»,
+# «по спецу Лемму») — упоминание, не участие (аудит 1.11)
+_ACTION_PREPS = {"к", "ко", "с", "со", "на", "за", "у", "против", "перед", "рядом", "вместе", "между", "при"}
+_VERB_END_RE = re.compile(r"(?:[её]т|ит|[ую]т|[ая]т|ся|сь|ть|ти)$")
+
+
+def _acts_in(text: str, m: re.Match, name: str) -> bool:
+    form = m.group(0).split()[0]
+    if form.lower() == name.split()[0].lower():
+        return True  # именительный падеж (в том числе в перечислении «X, Y»)
+    before = re.findall(r"[А-Яа-яЁё-]+", text[: m.start()])
+    if not before:
+        return False
+    prev = before[-1].lower()
+    return prev in _ACTION_PREPS or bool(_VERB_END_RE.search(prev))
+
+
+def find_acting_names(text: str, known_names: set[str]) -> list[str]:
+    """Имена, участвующие в действии (для события постраничной сетки): см. `_acts_in`."""
+    result: set[str] = set()
+    for n, m in _name_matches(text, known_names):
+        if _acts_in(text, m, n):
+            longer = [o for o in known_names if o != n and o.startswith(n + " ")]
+            result.add(longer[0] if len(longer) == 1 else n)
     return sorted(result)
 
 
@@ -162,6 +206,9 @@ def focal_names(path: Path) -> set[str]:
         if any("Фокальные" in h for h in table.headers):
             for row in table.rows:
                 for cell_text in row.values():
+                    # ячейка-предложение «Британец — никогда не фокален» — оговорка, не список имён
+                    if re.match(r"^\s*[А-ЯЁ][а-яё]+\s+[—–-]\s", cell_text):
+                        continue
                     names.update(re.findall(r"\b([А-ЯЁ][а-яё]{2,})\b", cell_text))
     return names - {"Тома", "Без", "Открывается"}
 
@@ -256,10 +303,17 @@ def registry_year_volume(path: Path) -> tuple[int | None, int]:
 
 
 def normalize_name(raw: str, known_names: set[str]) -> str:
-    """«Лемма» (глазами Лемма) → «Лемм»: известное имя, являющееся префиксом слова."""
+    """«Лемма» (глазами Лемма) → «Лемм», «куратор ОГПУ» → «Куратор ОГПУ», «куратор» → «Куратор ОГПУ»
+    (единственное полное имя с таким началом): известное имя в начале строки, в любом падеже."""
+    raw = raw.strip()
     word = raw.split()[0] if raw else ""
     for name in sorted(known_names, key=len, reverse=True):
-        if word.lower().startswith(name.lower()):
+        if name_pattern(name).match(raw):
+            return name
+    for name in sorted(known_names, key=len, reverse=True):
+        first = name.split()[0]
+        if " " in name and name_pattern(first).match(word) \
+                and sum(1 for o in known_names if o.split()[0] == first) == 1:
             return name
     return word
 
@@ -284,8 +338,8 @@ def parse_registry_briefs(path: Path, known_names: set[str] | None = None) -> li
                 focal = eyes.group(1)
             focal = normalize_name(focal, known_names)
             event = cell(row, "Событие")
-            # участники сцены — известные имена из события и «X глазами Y» (аудит 3.5)
-            participants = [n for n in find_names(f"{focal_raw} · {event}", known_names) if n != focal]
+            # участники сцены — имена, участвующие в действии события, и «X глазами Y» (аудит 3.5, 1.11)
+            participants = [n for n in find_acting_names(f"{focal_raw} · {event}", known_names) if n != focal]
             briefs.append(
                 Brief(
                     chapter=int(ch), volume=volume, year=year,
@@ -648,44 +702,100 @@ def parse_secrets(path: Path, known_names: set[str] | None = None, matrix: list[
 DOSSIER_HEAD_RE = re.compile(r"^#\s*Досье[^:]*:\s*(.+)$", re.MULTILINE)
 
 
-def parse_dossiers_real(paths: list[Path], known_names: set[str]) -> list[Dossier]:
-    """Карточки «# Досье 1.3: ИМЯ» (по нескольку в файле); отношения — проза [[Имя]]."""
-    dossiers: list[Dossier] = []
+def _dossier_cards(paths: list[Path]) -> list[tuple[Path, re.Match, str]]:
+    """(файл, заголовок «# Досье 1.3: ИМЯ…», тело карточки) по всем карточкам библиотеки."""
+    cards: list[tuple[Path, re.Match, str]] = []
     for path in paths:
         text = path.read_text(encoding="utf-8")
         heads = list(DOSSIER_HEAD_RE.finditer(text))
         for i, head in enumerate(heads):
             body = text[head.end(): heads[i + 1].start() if i + 1 < len(heads) else len(text)]
-            title = head.group(1)
-            main_title = re.sub(r"\(.*?\)", "", title)  # скобки — псевдонимы/пояснения
-            found = [
-                (m.start(), n) for n in known_names
-                if (m := re.search(n, main_title, re.IGNORECASE))
-            ]
-            name = min(found)[1] if found else title.split("(")[0].split()[-1].capitalize()
+            cards.append((path, head, body))
+    return cards
 
-            def section(pattern: str) -> str:
-                m = re.search(rf"##\s*{pattern}[^\n]*\n(.*?)(?=\n##\s|\Z)", body, re.DOTALL)
-                return m.group(1).strip() if m else ""
 
-            relations: dict[str, str] = {}
-            rel_body = section(r"Отношени")
-            # «[[Лемм]] — описание.» и без тире: «[[Ася]], [[Бугаев]] («своя, из выдвиженок»).» (аудит 3.7)
-            for rm in re.finditer(r"\[\[([^\]]+)\]\]\s*(?:[—-]+\s*)?([^\[]*)", rel_body):
-                descr = rm.group(2).strip().strip(",;. ").strip()
-                if descr.startswith("(") and descr.endswith(")"):
-                    descr = descr[1:-1].strip()
-                relations[rm.group(1).strip()] = descr.rstrip(". ") or "(связь отмечена без пояснения)"
-            dossiers.append(
-                Dossier(
-                    name=name,
-                    profile=section(r"Профил"),
-                    physique=section(r"Физик"),
-                    speech=section(r"Речевой"),
-                    relations=relations,
-                )
+def dossier_card_name(title: str, known_names: set[str]) -> str:
+    """Короткое имя карточки: известное имя, стоящее в заголовке раньше других («ОЛЬГА ЛЕММ» → Ольга),
+    иначе последнее слово заголовка — фамилия («АРТУР МЕРЕДИТ (рабочее имя, Р-013)» → Мередит)."""
+    main_title = re.sub(r"\(.*?\)", "", title)  # скобки — псевдонимы/пояснения
+    found = [
+        (m.start(), n) for n in known_names
+        if (m := re.search(rf"(?<![А-Яа-яЁё]){re.escape(n)}(?![А-Яа-яЁё])", main_title, re.IGNORECASE))
+    ]
+    return min(found)[1] if found else main_title.split()[-1].capitalize()
+
+
+def dossier_names(paths: list[Path], known_names: set[str]) -> set[str]:
+    """Имена всех карточек досье (источник известных имён наряду с субъектами матрицы, аудит 1.6)."""
+    return {dossier_card_name(head.group(1), known_names) for _, head, _ in _dossier_cards(paths)}
+
+
+def _dossier_section(body: str, pattern: str) -> str:
+    m = re.search(rf"##\s*{pattern}[^\n]*\n(.*?)(?=\n##\s|\Z)", body, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+def parse_dossiers_real(paths: list[Path], known_names: set[str]) -> list[Dossier]:
+    """Карточки «# Досье 1.3: ИМЯ» (по нескольку в файле); отношения — проза [[Имя]];
+    «## Опознавательный код» — приметы, по которым персонажа опознают (перстень, перчатка…)."""
+    dossiers: list[Dossier] = []
+    for _, head, body in _dossier_cards(paths):
+        name = dossier_card_name(head.group(1), known_names)
+        relations: dict[str, str] = {}
+        rel_body = _dossier_section(body, r"Отношени")
+        # «[[Лемм]] — описание.» и без тире: «[[Ася]], [[Бугаев]] («своя, из выдвиженок»).» (аудит 3.7)
+        for rm in re.finditer(r"\[\[([^\]]+)\]\]\s*(?:[—-]+\s*)?([^\[]*)", rel_body):
+            descr = rm.group(2).strip().strip(",;. ").strip()
+            if descr.startswith("(") and descr.endswith(")"):
+                descr = descr[1:-1].strip()
+            relations[rm.group(1).strip()] = descr.rstrip(". ") or "(связь отмечена без пояснения)"
+        dossiers.append(
+            Dossier(
+                name=name,
+                profile=_dossier_section(body, r"Профил"),
+                physique=_dossier_section(body, r"Физик"),
+                speech=_dossier_section(body, r"Речевой"),
+                code=_dossier_section(body, r"Опознавательн"),
+                relations=relations,
             )
+        )
     return dossiers
+
+
+_ARC_VOLUME_RE = re.compile(r"(?<![А-Яа-яЁё])[Тт]\.\s*(\d+)\s*:")
+
+
+def dossier_presence(paths: list[Path], volume: int, known_names: set[str]) -> dict[str, list[int]]:
+    """Главы тома, где персонаж в кадре по секции «## Арка» его карточки: во фрагменте «Т.N: …»
+    текущего тома номера «гл. K» — присутствие («Т.1: две немые сцены (пролог; кабаре, гл. 41)»).
+    Так участник попадает в главу, если сетка называет его описательно («британец»), а не по имени."""
+    presence: dict[str, list[int]] = {}
+    for _, head, body in _dossier_cards(paths):
+        arc = _dossier_section(body, r"Арк")
+        if not arc:
+            continue
+        marks = list(_ARC_VOLUME_RE.finditer(arc))
+        for i, m in enumerate(marks):
+            if int(m.group(1)) != volume:
+                continue
+            segment = arc[m.end(): marks[i + 1].start() if i + 1 < len(marks) else len(arc)]
+            chapters = chapters_listed(segment)
+            if chapters:
+                name = dossier_card_name(head.group(1), known_names)
+                seen = presence.setdefault(name, [])
+                seen.extend(c for c in chapters if c not in seen)
+    return presence
+
+
+def enrich_from_dossiers(briefs: list[Brief], paths: list[Path], known_names: set[str]) -> None:
+    """Участники глав по аркам досье (см. `dossier_presence`)."""
+    by_vol: dict[int, dict[str, list[int]]] = {}
+    for b in briefs:
+        if b.volume not in by_vol:
+            by_vol[b.volume] = dossier_presence(paths, b.volume, known_names)
+        for name, chapters in by_vol[b.volume].items():
+            if b.chapter in chapters and name != b.focal and name not in b.participants:
+                b.participants.append(name)
 
 
 # ------------------------------------------------------------- части тома
