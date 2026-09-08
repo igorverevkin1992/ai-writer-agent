@@ -811,6 +811,8 @@ def cmd_lint(
     llm: bool = typer.Option(False, "--llm", help="Дополнительно: смысловые противоречия моделью (по вызову на документ)."),
     files: list[str] = typer.Option([], "--файл", "--file", help="Только эти документы для модельного слоя (путь внутри библиотеки)."),
     watch: bool = typer.Option(False, "--watch", "--следить", help="Следить за библиотекой и перепроверять при каждом изменении."),
+    max_calls: int = typer.Option(40, "--лимит", "--max-calls", help="Предел оплачиваемых вызовов модели за прогон (--llm)."),
+    strict: bool = typer.Option(True, "--strict/--no-strict", help="Код возврата 1 при ошибках канона (для скриптов); панель вызывает --no-strict."),
 ) -> None:
     """Проверка канона на противоречия и ошибки логики повествования (машинный слой; --llm — модель)."""
     from . import lint as lint_mod
@@ -818,14 +820,38 @@ def cmd_lint(
     ws, cfg, lib = _ctx()
     if not isinstance(files, list):
         files = []
+    if not isinstance(max_calls, int):
+        max_calls = 40
+    if not isinstance(strict, bool):
+        strict = True
+    try:
+        llm_docs = lint_mod.resolve_library_files(lib, files) if llm else []
+    except ValueError as e:
+        _fail(str(e))
 
     def once() -> int:
-        report = lint_mod.run_lint(lib, ws.exports, ws.logs)
-        if llm and report.errors == 0:
-            extra, prompts = lint_mod.run_lint_llm(ws, cfg, lib, [lib / f for f in files] or None)
-            report = lint_mod.merge_llm(report, extra, ws.logs)
-            if prompts:
-                typer.secho(f"⚠ API недоступен: промпты модельного слоя сохранены ({len(prompts)}) в logs/линтер_промпты/", fg=typer.colors.YELLOW)
+        try:
+            report = lint_mod.run_lint(lib, ws.exports, ws.logs)
+        except Exception as e:  # noqa: BLE001 — сбой линтера виден как находка, не как трейсбек
+            report = lint_mod.error_report(e, ws.logs)
+        if llm:
+            if report.errors:
+                typer.secho(
+                    f"⚠ Модельный слой пропущен: сначала устраните {report.errors} ошиб. машинного слоя "
+                    "(выгрузки при ошибках разметки неполны — модель проверяла бы не тот канон).",
+                    fg=typer.colors.YELLOW,
+                )
+            else:
+                est = lint_mod.estimate_llm_cost(cfg, len(llm_docs))
+                typer.echo(f"Модельный слой: документов {len(llm_docs)}, вызовов ≤ {len(llm_docs)}"
+                           + (f", ≈ ${est:.2f}" if est is not None else ""))
+                try:
+                    extra, prompts = lint_mod.run_lint_llm(ws, cfg, lib, llm_docs, max_calls=max_calls)
+                except ValueError as e:
+                    _fail(str(e))
+                report = lint_mod.merge_llm(report, extra, ws.logs)
+                if prompts:
+                    typer.secho(f"⚠ API недоступен: промпты модельного слоя сохранены ({len(prompts)}) в logs/линтер_промпты/", fg=typer.colors.YELLOW)
         for f in report.findings:
             color = {"ошибка": typer.colors.RED, "предупреждение": typer.colors.YELLOW, "заметка": typer.colors.BLUE}[f.severity]
             where = f"{f.file}:{f.line}" if f.line else f.file
@@ -840,12 +866,23 @@ def cmd_lint(
         return report.errors
 
     if not watch:
-        raise typer.Exit(code=1 if once() else 0)
+        errors = once()
+        if errors and strict:
+            raise typer.Exit(code=1)
+        return
     from . import canonwatch
 
     once()
     typer.echo("Слежу за библиотекой (Ctrl+C — стоп)…")
-    watcher = canonwatch.CanonWatcher(lib, lambda changed: (typer.echo(f"\nИзменено: {', '.join(changed)}"), once()))
+
+    def on_change(changed: list[str]) -> None:
+        typer.echo(f"\nИзменено: {', '.join(changed)}")
+        try:
+            once()
+        except Exception as e:  # noqa: BLE001 — наблюдение продолжается, причина видна
+            typer.secho(f"⚠ Проверка не выполнена: {e}", fg=typer.colors.RED)
+
+    watcher = canonwatch.CanonWatcher(lib, on_change)
     try:
         watcher.run_forever()
     except KeyboardInterrupt:

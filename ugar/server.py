@@ -198,6 +198,11 @@ class PanelAPI:
         self.lint_changed: list[str] = []
         self.lint_pending = False
         self.lint_running = False
+        self._lint_lock = threading.Lock()
+        self._lint_wake = threading.Event()
+        self._lint_done = threading.Event()
+        self._lint_stop = threading.Event()
+        self._lint_thread: threading.Thread | None = None
         self.watcher = canonwatch.CanonWatcher(self.library, self._on_canon_change)
 
     # ------------------------------------------------------------- чтение
@@ -489,28 +494,66 @@ class PanelAPI:
     # ------------------------------------------------------- канон и линтер
 
     def _on_canon_change(self, changed: list[str]) -> None:
-        self.lint_changed = changed
-        self.lint_pending = True
-        self.run_lint_now()
+        self.request_lint(changed)
 
-    def run_lint_now(self) -> None:
-        """Перепроверка канона, если сервер свободен; иначе — при следующем опросе состояния."""
+    def request_lint(self, changed: list[str] | None = None, wait: float = 0.0) -> None:
+        """Ставит перепроверку канона в очередь единственного рабочего потока. Ни HTTP-обработчик, ни
+        наблюдатель линтер сами не запускают (4.4–4.5): один исполнитель, экспорт под общим замком задач,
+        любое исключение — находка ЛИНТ-0. `wait` — подождать результата (секунд), чтобы ответ на
+        сохранение уже содержал свежую сводку."""
+        self.start_lint_worker()
+        with self._lint_lock:
+            if changed:
+                self.lint_changed = changed
+            self.lint_pending = True
+            self._lint_done.clear()
+        self._lint_wake.set()
+        if wait:
+            self._lint_done.wait(wait)
+
+    def _lint_worker(self) -> None:
         from . import lint as lint_mod
 
-        try:
-            with self.jobs.exclusive():
-                self.lint_running = True
+        while not self._lint_stop.is_set():
+            self._lint_wake.wait()
+            if self._lint_stop.is_set():
+                return
+            self._lint_wake.clear()
+            while self.lint_pending and not self._lint_stop.is_set():
                 try:
-                    self.lint_report = lint_mod.run_lint(self.library, self.ws.exports, self.ws.logs)
-                    self.lint_pending = False
-                finally:
-                    self.lint_running = False
-        except RuntimeError:
-            self.lint_pending = True  # занято задачей — повторим позже
+                    with self.jobs.exclusive():
+                        with self._lint_lock:
+                            self.lint_running = True
+                            self.lint_pending = False
+                        try:
+                            report = lint_mod.run_lint(self.library, self.ws.exports, self.ws.logs)
+                        except Exception as e:  # noqa: BLE001 — сбой виден как находка
+                            report = lint_mod.error_report(e, self.ws.logs)
+                        finally:
+                            with self._lint_lock:
+                                self.lint_running = False
+                        self.lint_report = report
+                except RuntimeError:
+                    # занято задачей (JobRunner) — подождём и повторим, не теряя запроса
+                    self._lint_stop.wait(1.0)
+                    continue
+            self._lint_done.set()
+
+    def start_lint_worker(self) -> None:
+        if self._lint_thread is None:
+            self._lint_thread = threading.Thread(target=self._lint_worker, daemon=True, name="canon-lint")
+            self._lint_thread.start()
+
+    def stop_lint_worker(self) -> None:
+        self._lint_stop.set()
+        self._lint_wake.set()
+
+    def run_lint_now(self) -> None:
+        """Совместимость: синхронная перепроверка через очередь (ждём результата)."""
+        self.request_lint(wait=30.0)
 
     def lint(self) -> dict:
-        if self.lint_pending and not self.jobs.busy and not self.lint_running:
-            self.run_lint_now()
+        """GET без побочных эффектов (аудит 4.3): только текущий отчёт и флаги очереди."""
         from . import lint as lint_mod
 
         fresh = lint_mod.load_report(self.ws.logs)
@@ -567,8 +610,7 @@ class PanelAPI:
             with guard.canon_write_session():
                 guard.write_text(path, text)
         self.watcher._snapshot = self.watcher._scan()  # своя запись — не «внешнее» изменение
-        self.lint_changed = [rel]
-        self.run_lint_now()
+        self.request_lint([rel], wait=15.0)  # ответ несёт свежую сводку; при долгом линте — «pending»
         return {"saved": rel, "version": self._version(text), "mtime": path.stat().st_mtime_ns, "lint": self.lint_summary()}
 
     def apply_lint_fix(self, fix_data: dict) -> dict:
@@ -585,8 +627,7 @@ class PanelAPI:
             with guard.canon_write_session():
                 lint_mod.apply_fix(self.library, fix)
         self.watcher._snapshot = self.watcher._scan()
-        self.lint_changed = [fix.file]
-        self.run_lint_now()
+        self.request_lint([fix.file], wait=15.0)
         return {"applied": fix.model_dump(), "lint": self.lint_summary()}
 
     def run_command(self, cmd: str, chapter: int | None, params: dict | None = None) -> dict:
@@ -620,8 +661,8 @@ class PanelAPI:
             "canonize": lambda: cli.cmd_canonize(chapter, apply=False, yes=True),
             # подтверждение автор дал кнопкой + диалогом в панели (Д-8)
             "canonize-apply": lambda: cli.cmd_canonize(chapter, apply=True, yes=True),
-            "lint": lambda: cli.cmd_lint(llm=False, files=[], watch=False),
-            "lint-llm": lambda: cli.cmd_lint(llm=True, files=list(params.get("files") or []), watch=False),
+            "lint": lambda: cli.cmd_lint(llm=False, files=[], watch=False, max_calls=40, strict=False),
+            "lint-llm": lambda: cli.cmd_lint(llm=True, files=list(params.get("files") or []), watch=False, max_calls=40, strict=False),
             # подтверждение автор дал диалогом в панели (Д-8); сообщение — из поля панели
             "canon-commit": lambda: cli.cmd_canon_commit(message=str(params.get("message") or "правка канона из панели"), yes=True),
         }
@@ -837,5 +878,6 @@ def serve(ws: Workspace, cfg: Config, library: Path, port: int = 8765, watch: bo
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(api))
     server.api = api  # type: ignore[attr-defined]
     if watch:
+        api.start_lint_worker()
         api.watcher.start()  # линтер канона в реальном времени
     return server

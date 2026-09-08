@@ -543,10 +543,42 @@ def _context_slices(exports_dir: Path) -> str:
     return "\n".join(lines)
 
 
-def run_lint_llm(ws: Workspace, cfg: Config, library: Path, files: list[Path] | None = None) -> tuple[list[LintFinding], list[str]]:
+def resolve_library_files(library: Path, files: list[str] | None) -> list[Path]:
+    """Документы для модельного слоя: только .md ВНУТРИ библиотеки (иначе содержимое произвольного
+    файла ушло бы в API и в logs/линтер_промпты/)."""
+    if not files:
+        return _library_docs(library)
+    root = library.resolve()
+    out: list[Path] = []
+    for f in files:
+        path = (library / f).resolve()
+        if root not in path.parents or path.suffix != ".md":
+            raise ValueError(f"«{f}»: документ модельного слоя должен быть .md внутри библиотеки")
+        if not path.exists():
+            raise ValueError(f"«{f}»: нет такого документа в библиотеке")
+        out.append(path)
+    return out
+
+
+def estimate_llm_cost(cfg: Config, n_docs: int, avg_chars: int = 12_000) -> float | None:
+    """Грубая смета модельного слоя по ценам из config.yaml (0 = цены не заданы → None)."""
+    mc = cfg.canonist
+    if not (mc.price_in_per_1m or mc.price_out_per_1m):
+        return None
+    tokens_in = n_docs * (avg_chars / 3 + 3_000)   # документ + контекст канона, ~3 символа на токен
+    tokens_out = n_docs * 800
+    return tokens_in / 1e6 * mc.price_in_per_1m + tokens_out / 1e6 * mc.price_out_per_1m
+
+
+def run_lint_llm(ws: Workspace, cfg: Config, library: Path, files: list[Path] | None = None,
+                 max_calls: int | None = None) -> tuple[list[LintFinding], list[str]]:
     """Смысловые противоречия по документам (по одному вызову на документ). Возвращает (находки, промпты
-    ручного режима, если API недоступен)."""
+    ручного режима, если API недоступен). Сбой на одном документе (нет JSON в ответе, ошибка API) не
+    теряет находки уже проверенных: он становится находкой ЛИНТ-0 по этому документу. `max_calls`
+    ограничивает число оплачиваемых вызовов за прогон."""
     docs = files or _library_docs(library)
+    if max_calls is not None and len(docs) > max_calls:
+        raise ValueError(f"документов {len(docs)}, лимит вызовов модели {max_calls}: укажите --файл или поднимите --лимит")
     system = _template()
     context = _context_slices(ws.exports)
     findings: list[LintFinding] = []
@@ -558,10 +590,14 @@ def run_lint_llm(ws: Workspace, cfg: Config, library: Path, files: list[Path] | 
         guard.write_text(prompt_path, f"<!-- system -->\n{system}\n\n<!-- user -->\n{user}\n")
         try:
             raw = adapters.call_anthropic(system, user, cfg.canonist, cfg.api, ws.logs, role="линтер канона")
+            findings += parse_llm_findings(raw, library, doc)
         except adapters.ManualModeNeeded:
             prompts.append(str(prompt_path))
-            continue
-        findings += parse_llm_findings(raw, library, doc)
+        except Exception as e:  # noqa: BLE001 — один документ не должен отменять весь прогон
+            findings.append(LintFinding(
+                code="ЛИНТ-0", severity="заметка", file=rel, source="модель",
+                message=f"модельный слой не дал результата по документу: {type(e).__name__}: {str(e)[:200]}",
+            ))
     return findings, prompts
 
 
@@ -581,6 +617,17 @@ def parse_llm_findings(raw: str, library: Path, doc: Path) -> list[LintFinding]:
             quote=quote, source="модель",
         ))
     return out
+
+
+def error_report(exc: BaseException, logs_dir: Path, files: int = 0) -> LintReport:
+    """Сбой самого линтера (нечитаемый файл, ошибка программы) — не исчезает молча, а становится
+    находкой ЛИНТ-0 уровня «ошибка»: автор видит причину в панели и в logs/lint.md."""
+    hint = ""
+    if isinstance(exc, UnicodeDecodeError):
+        hint = " — файл не в UTF-8 (NFR-8): пересохраните его в UTF-8"
+    return _finish([LintFinding(code="ЛИНТ-0", severity="ошибка", file=getattr(exc, "path", "") or "",
+                                message=f"проверка канона не выполнена: {type(exc).__name__}: {exc}{hint}")],
+                   logs_dir, files)
 
 
 def merge_llm(report: LintReport, extra: list[LintFinding], logs_dir: Path) -> LintReport:

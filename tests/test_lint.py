@@ -237,3 +237,94 @@ def test_cli_lint(ws, library, monkeypatch):
     r = runner.invoke(app, ["lint"])
     assert r.exit_code == 1 and "ХРОН-2" in r.output
     assert (ws.logs / "lint.md").read_text(encoding="utf-8").count("ошибка") >= 1
+
+
+# ------------------------------------------------------------- этап 1 второго аудита (4.4–4.6, 4.10)
+
+
+def test_сбой_линтера_становится_находкой_а_не_циклом(ws, library, monkeypatch):
+    """Файл не в UTF-8 в библиотеке: наблюдатель/панель не зацикливаются, автор видит ЛИНТ-0 с причиной."""
+    (library / "Досье" / "Персонаж_Плохой.md").write_bytes("# Досье\n\nТекст в cp1251: ёж".encode("cp1251"))
+    with pytest.raises(UnicodeDecodeError):
+        lint.run_lint(library, ws.exports, ws.logs)
+    monkeypatch.chdir(ws.root)
+    srv = server.serve(ws, Config(), library, port=0, watch=False)
+    api = srv.api  # type: ignore[attr-defined]
+    try:
+        api.request_lint(["Досье/Персонаж_Плохой.md"], wait=10.0)
+        assert api.lint_report and api.lint_report.errors == 1
+        f = api.lint_report.findings[0]
+        assert f.code == "ЛИНТ-0" and "UTF-8" in f.message and not api.lint_pending and not api.lint_running
+        # GET /api/lint — без побочных эффектов: выгрузки не пересобираются, отчёт тот же
+        stamp = (ws.exports / "manifest.json").stat().st_mtime_ns
+        assert api.lint()["report"]["findings"][0]["code"] == "ЛИНТ-0"
+        assert (ws.exports / "manifest.json").stat().st_mtime_ns == stamp
+    finally:
+        api.stop_lint_worker()
+        srv.server_close()
+    # CLI: тот же сбой — находка и код возврата 1, без трейсбека
+    r = CliRunner().invoke(app, ["lint"])
+    assert r.exit_code == 1 and "ЛИНТ-0" in r.output and "Traceback" not in r.output
+
+
+def test_очередь_линтера_ждёт_занятый_сервер(ws, library, monkeypatch):
+    """Пока идёт задача (JobRunner занят), запрос не теряется: выполняется после освобождения."""
+    monkeypatch.chdir(ws.root)
+    srv = server.serve(ws, Config(), library, port=0, watch=False)
+    api = srv.api  # type: ignore[attr-defined]
+    try:
+        with api.jobs.exclusive():
+            api.request_lint(["x.md"], wait=1.5)
+            assert api.lint_pending and api.lint_report is None
+        api._lint_done.wait(10.0)
+        assert api.lint_report is not None and not api.lint_pending
+    finally:
+        api.stop_lint_worker()
+        srv.server_close()
+
+
+def test_модельный_слой_только_внутри_библиотеки(ws, library, monkeypatch):
+    secret = ws.root / "секрет.txt"
+    secret.write_text("ключ", encoding="utf-8")
+    with pytest.raises(ValueError, match="внутри библиотеки"):
+        lint.resolve_library_files(library, ["../секрет.txt"])
+    with pytest.raises(ValueError, match="нет такого"):
+        lint.resolve_library_files(library, ["нет.md"])
+    assert lint.resolve_library_files(library, ["23_Поглавник_Том1.md"]) == [(library / "23_Поглавник_Том1.md").resolve()]
+    monkeypatch.chdir(ws.root)
+    r = CliRunner().invoke(app, ["lint", "--llm", "--файл", "../секрет.txt"])
+    assert r.exit_code == 1 and "внутри библиотеки" in r.output
+    assert not any("ключ" in p.read_text(encoding="utf-8") for p in (ws.logs / "линтер_промпты").glob("*")) if (ws.logs / "линтер_промпты").exists() else True
+
+
+def test_модельный_слой_сбой_одного_документа_не_теряет_остальные(ws, library, monkeypatch):
+    from ugar import adapters
+
+    calls = []
+
+    def fake_call(system, user, mc, api, logs_dir, *, role):
+        calls.append(user.split("\n", 1)[0])
+        if len(calls) == 1:
+            return "никакого JSON тут нет"
+        if len(calls) == 2:
+            raise RuntimeError("HTTP 500 от API")
+        return '[{"quote": "Глава 1", "problem": "проблема", "suggestion": "решение", "severity": "заметка"}]'
+
+    monkeypatch.setattr(adapters, "call_anthropic", fake_call)
+    docs = [library / "23_Поглавник_Том1.md", library / "31_Матрица_знаний.md", library / "36_Журнал_решений.md"]
+    findings, prompts = lint.run_lint_llm(ws, Config(), library, docs)
+    assert len(calls) == 3 and not prompts
+    codes = [f.code for f in findings]
+    assert codes.count("ЛИНТ-0") == 2 and "МОДЕЛЬ" in codes
+    with pytest.raises(ValueError, match="лимит"):
+        lint.run_lint_llm(ws, Config(), library, docs, max_calls=2)
+
+
+def test_панель_lint_с_ошибками_не_помечается_сбоем(ws, library, monkeypatch):
+    """Ошибки канона — результат проверки, а не сбой задачи: в панели задача «lint» завершается «готово»."""
+    _edit(library / "23_Поглавник_Том1.md", "- Дата: 12 июня 1995", "- Дата: 12 июля 1995")
+    monkeypatch.chdir(ws.root)
+    r = CliRunner().invoke(app, ["lint", "--no-strict"])
+    assert r.exit_code == 0 and "ХРОН-2" in r.output
+    r = CliRunner().invoke(app, ["lint", "--llm", "--no-strict"])
+    assert r.exit_code == 0 and "Модельный слой пропущен" in r.output
