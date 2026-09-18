@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from . import adapters, cancel, exporter, gitops, guard, llmjson, realcanon
+from . import adapters, cancel, canonchange, exporter, gitops, guard, llmjson, realcanon
 from .config import Config
 from .paths import Workspace
 from .schemas import Act, CircleStep, StoryCircle
@@ -385,24 +385,20 @@ def commit_to_canon(ws: Workspace, cfg: Config, library: Path) -> tuple[Path, st
     new = drafts(ws)
     if not new:
         raise RuntimeError("черновиков кругов нет — сначала постройте их (`ugar circles`).")
-    if gitops.is_repo(library):
-        if gitops.dirty(library):
-            raise RuntimeError(
-                "в библиотеке незакоммиченные изменения — внесение кругов требует чистого git. "
-                "Закоммитьте их (`ugar canon-commit`) или откатите, затем повторите."
-            )
-        if not gitops.has_identity(library):
-            raise RuntimeError("git не настроен: задайте user.name/user.email в библиотеке.")
     merged = {(c.scope, c.key): c for c in canon_circles(ws)}
     for c in new:
         merged[(c.scope, c.key)] = c
     acts = act_list(ws)
     path = library / CANON_DOC
-    with guard.canon_write_session():
-        guard.write_text(path, render_canon_doc(list(merged.values()), acts))
-    exporter.run_export(library, ws.exports, ws.logs)
-    n = len(new)
-    message = f"[круги истории] внесено кругов: {n} (каркас драматургии, Р-020)"
-    if gitops.is_repo(library):
-        return path, gitops.commit_all(library, message, author=cfg.commit_author) or "(изменений в каноне нет)"
-    return path, "(библиотека не под git — коммит пропущен, настройте git!)"
+    text = render_canon_doc(list(merged.values()), acts)
+    message = f"[круги истории] внесено кругов: {len(new)} (каркас драматургии, Р-020)"
+    # единый конвейер: чистый git → сессия записи → выгрузки → линт → коммит (или «не под git»)
+    result = canonchange.canon_change(
+        ws, cfg, library, lambda: guard.write_text(path, text), message,
+        commit=True, author_confirmed=True, action="внесение кругов",
+    )
+    if result.commit:
+        return path, result.commit
+    if not gitops.is_repo(library):
+        return path, "(библиотека не под git — коммит пропущен, настройте git!)"
+    return path, "(изменений в каноне нет)"

@@ -20,6 +20,7 @@ import typer
 from . import (
     adapters,
     cancel,
+    canonchange,
     canonist,
     compiler,
     dashboard as dashboard_mod,
@@ -1368,48 +1369,48 @@ def cmd_canon_commit(
     ws, cfg, lib = _ctx()
     if not gitops.is_repo(lib):
         _fail("библиотека не под git — инициализируйте репозиторий.")
-    if gitops.in_progress(lib):
-        _fail(
-            f"в библиотеке незавершённая операция git ({gitops.in_progress(lib)}) — в документах могут быть маркеры "
-            "конфликта «<<<<<<<»; завершите или отмените её (`git revert --abort`), затем повторите."
-        )
     manifest = ws.exports / "manifest.json"
     old_norms_hash = None
     if manifest.exists():
         old_norms_hash = json.loads(manifest.read_text(encoding="utf-8"))["files"].get("norms.json")
+
+    def ask(result: canonchange.ChangeResult) -> bool:
+        """Между линтом и коммитом: предупреждения автору и вопрос (Д-8)."""
+        if (
+            old_norms_hash is not None
+            and result.export_hashes.get("norms.json") != old_norms_hash
+            and not gitops.check_norm_change_message(message)
+        ):
+            typer.secho(
+                "⚠ Изменены нормы (02 §5), но в сообщении коммита нет ссылки Р-№ на запись "
+                "в 36_Журнал — предупреждение, не блокировка (сценарий Б).",
+                fg=typer.colors.YELLOW,
+            )
+        if not gitops.dirty(lib):
+            return False
+        if result.lint and (result.lint.errors or result.lint.warnings):
+            typer.secho(
+                f"⚠ Проверка канона: ошибок {result.lint.errors}, предупреждений {result.lint.warnings} (logs/lint.md) — "
+                "коммит не блокируется, решение за автором.",
+                fg=typer.colors.YELLOW,
+            )
+        if not yes and not typer.confirm(f"Закоммитить изменения библиотеки: «{message}»? (Д-8) (y)"):
+            raise typer.Exit()
+        return True
+
+    # единый конвейер изменения канона: правки автор уже сделал на диске (writer пуст) →
+    # валидация Д-1 + выгрузки → линт → коммит; незавершённый revert блокирует до любой записи
     try:
-        hashes = exporter.run_export(lib, ws.exports, ws.logs)  # валидация Д-1 + выгрузки
+        result = canonchange.canon_change(
+            ws, cfg, lib, lambda: None, message, commit=True, author_confirmed=True,
+            require_clean=False, action="коммит канона", confirm=ask,
+        )
     except MarkupError as e:
         _fail(f"структура MD расходится с соглашениями Д-1 → {e}")
-    if (
-        old_norms_hash is not None
-        and hashes["norms.json"] != old_norms_hash
-        and not gitops.check_norm_change_message(message)
-    ):
-        typer.secho(
-            "⚠ Изменены нормы (02 §5), но в сообщении коммита нет ссылки Р-№ на запись "
-            "в 36_Журнал — предупреждение, не блокировка (сценарий Б).",
-            fg=typer.colors.YELLOW,
-        )
-    if not gitops.dirty(lib):
+    if result.commit is None:
         typer.echo("В библиотеке нет изменений — коммитить нечего.")
         return
-    from . import lint as lint_mod
-
-    report = lint_mod.run_lint(lib, ws.exports, ws.logs, export=False)  # выгрузки только что пересобраны
-    if report.errors or report.warnings:
-        typer.secho(
-            f"⚠ Проверка канона: ошибок {report.errors}, предупреждений {report.warnings} (logs/lint.md) — "
-            "коммит не блокируется, решение за автором.",
-            fg=typer.colors.YELLOW,
-        )
-    if not yes and not typer.confirm(f"Закоммитить изменения библиотеки: «{message}»? (Д-8) (y)"):
-        raise typer.Exit()
-    commit = gitops.commit_all(lib, message, author=cfg.commit_author)
-    if commit is None:
-        typer.echo("В библиотеке нет изменений — коммитить нечего.")
-        return
-    typer.secho(f"Канон закоммичен: {commit}", fg=typer.colors.GREEN)
+    typer.secho(f"Канон закоммичен: {result.commit}", fg=typer.colors.GREEN)
 
 
 @app.command("backup", rich_help_panel="Канон и бэкап")

@@ -185,6 +185,14 @@ export default function App() {
           <br />
           Канон:{" "}
           {state.lint === null ? "не проверялся" : state.lint.errors ? `ошибок ${state.lint.errors} ✗` : state.lint.warnings ? `предупреждений ${state.lint.warnings}` : "противоречий нет ✓"}
+          {state.canon_uncommitted && (
+            <>
+              <br />
+              <span className="bad" title={(state.canon_uncommitted_files ?? []).join("\n")}>
+                Канон: {(state.canon_uncommitted_files ?? []).length} файл(ов) не закоммичено
+              </span>
+            </>
+          )}
           <br />
           <span title="авторские паузы всех глав за сегодня (5.7)">сегодня: {state.author_today_min ?? 0} мин автора</span>
         </div>
@@ -267,7 +275,8 @@ export default function App() {
           />
         )}
         {view?.kind === "канон" && (
-          <Canon busy={running || offline} runCommand={runCommand} notify={notify} confirm={confirm} refreshTick={refreshTick} />
+          <Canon busy={running || offline} runCommand={runCommand} notify={notify} confirm={confirm} refreshTick={refreshTick}
+            uncommitted={state.canon_uncommitted_files ?? []} />
         )}
         {view?.kind === "поиск" && <SearchView q={view.q} notify={notify} />}
         {view?.kind === "глава" && (

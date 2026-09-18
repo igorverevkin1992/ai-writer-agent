@@ -60,16 +60,52 @@ def _find_file(library: Path, pattern: str) -> Path:
     return matches[0]
 
 
-def _dump(path: Path, model: BaseModel | list | dict) -> str:
+def _render(model: BaseModel | list | dict) -> str:
+    """Текст выгрузки (детерминированный JSON, FR-X3) — без записи."""
     if isinstance(model, BaseModel):
         data = model.model_dump(by_alias=True)
     elif isinstance(model, list):
         data = [m.model_dump(by_alias=True) if isinstance(m, BaseModel) else m for m in model]
     else:
         data = {k: (v.model_dump() if isinstance(v, BaseModel) else v) for k, v in model.items()}
-    text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    guard.write_text(path, text)
+    return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_if_changed(path: Path, text: str, known_hash: str | None = None) -> str:
+    """Инкрементальная запись (26а): файл перезаписывается, только если его содержимое изменилось —
+    без лишних fsync и `os.replace` под чужим чтением (Windows: PermissionError). `known_hash` — хэш из
+    manifest.json прошлого экспорта: расходится с новым — пишем сразу; иначе истина — содержимое на
+    диске (правка выгрузок руками перетирается, как обещает докстринг модуля)."""
+    digest = _sha(text)
+    if known_hash is not None and known_hash != digest:
+        guard.write_text(path, text)  # прошлый экспорт был другим — без чтения диска
+        return digest
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            return digest
+    except (OSError, UnicodeDecodeError):
+        pass
+    guard.write_text(path, text)
+    return digest
+
+
+def _dump(path: Path, model: BaseModel | list | dict, known_hash: str | None = None) -> str:
+    return _write_if_changed(path, _render(model), known_hash)
+
+
+def load_manifest(exports_dir: Path) -> dict[str, str]:
+    """{файл: sha256} прошлого экспорта; пусто, если manifest.json нет или он повреждён."""
+    path = exports_dir / "manifest.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        files = data.get("files", {}) if isinstance(data, dict) else {}
+        return {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)}
+    except (OSError, ValueError, AttributeError):
+        return {}
 
 
 # ------------------------------------------------------------------ разборы
@@ -480,23 +516,69 @@ def load_documents(exports_dir: Path) -> list[DocumentSpec]:
     return [DocumentSpec.model_validate(d) for d in load_export(exports_dir, "documents.json")]
 
 
-def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
-    """corpus/ — принятые главы в нормализованном виде (для n-грамм и TTR)."""
+CORPUS_INDEX = ".index.json"  # кэш корпуса: имя главы → mtime_ns/size источника и хэш результата
+
+
+def _load_corpus_index(corpus_dir: Path) -> dict[str, dict]:
+    try:
+        data = json.loads((corpus_dir / CORPUS_INDEX).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _corpus_plan(library: Path, exports_dir: Path) -> tuple[list[tuple[Path, str | None, dict]], dict[str, dict]]:
+    """Что писать в corpus/ — без записи. Для каждой главы Проза/*.md: (файл корпуса, текст или None,
+    запись индекса). Текст None — источник не менялся (mtime_ns и size те же, что в `.index.json`)
+    и файл корпуса на месте: нормализация и запись пропускаются (26а)."""
+    corpus_dir = exports_dir / "corpus"
+    index = _load_corpus_index(corpus_dir)
+    plan: list[tuple[Path, str | None, dict]] = []
+    for path in sorted(library.glob("Проза/*.md")):
+        out = corpus_dir / (path.stem + ".txt")
+        st = path.stat()
+        entry = index.get(out.name)
+        if (
+            isinstance(entry, dict)
+            and entry.get("mtime_ns") == st.st_mtime_ns
+            and entry.get("size") == st.st_size
+            and isinstance(entry.get("hash"), str)
+            and out.exists()
+        ):
+            plan.append((out, None, entry))
+            continue
+        tokens = textutils.normalize(textutils.narrator_text(path.read_text(encoding="utf-8")))
+        text = " ".join(tokens) + "\n"
+        plan.append((out, text, {"mtime_ns": st.st_mtime_ns, "size": st.st_size, "hash": _sha(text)}))
+    return plan, index
+
+
+def _write_corpus(plan: list[tuple[Path, str | None, dict]], exports_dir: Path, old_index: dict[str, dict]) -> dict[str, str]:
+    """Запись корпуса по плану: только изменённые главы; устаревшие файлы удаляются через guard."""
     corpus_dir = exports_dir / "corpus"
     hashes: dict[str, str] = {}
-    seen: set[str] = set()
-    for path in sorted(library.glob("Проза/*.md")):
-        tokens = textutils.normalize(textutils.narrator_text(path.read_text(encoding="utf-8")))
-        out = corpus_dir / (path.stem + ".txt")
-        text = " ".join(tokens) + "\n"
-        guard.write_text(out, text)
-        seen.add(out.name)
-        hashes[out.name] = hashlib.sha256(text.encode()).hexdigest()
+    new_index: dict[str, dict] = {}
+    for out, text, entry in plan:
+        if text is not None:
+            _write_if_changed(out, text)
+        hashes[out.name] = entry["hash"]
+        new_index[out.name] = entry
     if corpus_dir.exists():
         for stale in corpus_dir.glob("*.txt"):
-            if stale.name not in seen:
-                stale.unlink()
+            if stale.name not in hashes:
+                guard.remove(stale)
+    if new_index != old_index:
+        guard.write_text(corpus_dir / CORPUS_INDEX,
+                         json.dumps(new_index, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return hashes
+
+
+def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
+    """corpus/ — принятые главы в нормализованном виде (для n-грамм и TTR).
+    Инкрементально: пересчитываются и перезаписываются только изменённые `Проза/*.md`
+    (кэш по mtime+size в `corpus/.index.json`), неизменённые файлы не трогаются."""
+    plan, old_index = _corpus_plan(library, exports_dir)
+    return _write_corpus(plan, exports_dir, old_index)
 
 
 # --------------------------------------------------------------- запуск
@@ -505,9 +587,10 @@ def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
 def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, str]:
     """Перегенерирует все выгрузки (FR-X1). Возвращает {файл: sha256}.
 
-    Сначала разбирается ВЕСЬ канон, и только затем пишутся файлы: ошибка
+    Сначала разбирается ВЕСЬ канон (включая план корпуса), и только затем пишутся файлы: ошибка
     структуры в одном документе не оставляет exports/ в смешанном состоянии
-    со старым manifest.json (контроль дрейфа, FR-X3).
+    со старым manifest.json (контроль дрейфа, FR-X3). Пишутся только изменившиеся
+    выгрузки (сравнение с manifest.json и содержимым на диске, 26а).
     """
     parsed = {
         "norms.json": export_norms(library),
@@ -526,16 +609,15 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, st
         "chronicle.json": export_chronicle(library),
         "chronology.json": export_chronology(library),
     }
+    corpus_plan, old_index = _corpus_plan(library, exports_dir)  # тоже до записи
+    known = load_manifest(exports_dir)
     hashes: dict[str, str] = {}
     for name, data in parsed.items():
-        hashes[name] = _dump(exports_dir / name, data)
-    hashes.update(export_corpus(library, exports_dir))
+        hashes[name] = _dump(exports_dir / name, data, known.get(name))
+    hashes.update(_write_corpus(corpus_plan, exports_dir, old_index))
 
     manifest = {"files": hashes}
-    guard.write_text(
-        exports_dir / "manifest.json",
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-    )
+    _write_if_changed(exports_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     guard.append_text(
         logs_dir / "export.jsonl",
         json.dumps(

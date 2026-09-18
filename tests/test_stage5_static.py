@@ -37,13 +37,23 @@ def test_в_верификаторе_нет_числовых_порогов():
     assert not offenders, "\n".join(offenders)
 
 
+def _owner_name(func: ast.expr) -> str:
+    owner = func.value if isinstance(func, ast.Attribute) else None
+    return owner.id if isinstance(owner, ast.Name) else ""
+
+
 def test_нет_записи_файлов_мимо_guard():
-    """FR-K3: единственная точка записи — guard.write_text/append_text. Прямые записи допустимы только
-    в перечисленных функциях, и все они пишут вне библиотеки (init копирует демо-библиотеку до её защиты)."""
+    """FR-K3: единственная точка записи и удаления — guard.write_text/append_text/remove. Прямые записи,
+    переименования и удаления (os.replace/rename/unlink, shutil.rmtree/move, Path.unlink/rename/rmdir)
+    и вызовы git через subprocess вне gitops.py допустимы только в перечисленных функциях, и все они
+    работают вне библиотеки (init копирует демо-библиотеку до её защиты, компиляция окна — во временной папке)."""
     allowed = {
         "cli.py": {"cmd_init", "cmd_retest", "cmd_apply_edits", "_compile_window_to"},
     }
-    writers = {"write_text", "write_bytes", "copyfile", "copytree", "move", "copy", "copy2"}
+    writers = {"write_text", "write_bytes", "copyfile", "copytree", "move", "copy", "copy2", "rmtree"}
+    # у str/set/dict есть свои replace/remove — эти имена считаются файловыми только у os/shutil
+    os_only = {"replace", "remove", "rename", "unlink", "rmdir", "removedirs", "renames"}
+    any_owner = {"unlink", "rmdir", "rename"}  # методов с такими именами у str/dict/set нет — это Path
     offenders = []
     for path in sorted(UGAR.glob("*.py")):
         if path.name == "guard.py":
@@ -56,18 +66,45 @@ def test_нет_записи_файлов_мимо_guard():
                 continue
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            owner = _owner_name(func)
             raw_write = False
-            if name in writers:
-                owner = func.value if isinstance(func, ast.Attribute) else None
-                if not (isinstance(owner, ast.Name) and owner.id == "guard"):
-                    raw_write = True
+            if name in writers and owner != "guard":
+                raw_write = True
+            elif name in os_only and owner in ("os", "shutil"):
+                raw_write = True
+            elif name in any_owner and owner not in ("guard",):
+                raw_write = True
             elif name == "open":
                 modes = [a for a in node.args[1:2]] + [k.value for k in node.keywords if k.arg == "mode"]
                 if any(isinstance(m, ast.Constant) and isinstance(m.value, str) and set(m.value) & {"w", "a"} for m in modes):
                     raw_write = True
+            elif owner == "subprocess" and path.name != "gitops.py":
+                first = node.args[0] if node.args else None
+                argv = first.elts if isinstance(first, (ast.List, ast.Tuple)) else []
+                if argv and isinstance(argv[0], ast.Constant) and argv[0].value == "git":
+                    raw_write = True  # git над библиотекой — только через gitops
             if raw_write and spans.get(node.lineno) not in allowed.get(path.name, set()):
                 offenders.append(f"{path.name}:{node.lineno}: {name}")
     assert not offenders, "\n".join(offenders)
+
+
+def test_сессию_записи_в_канон_открывает_только_canonchange():
+    """Аудит 4.12 / п. 25: `guard.canon_write_session()` открывает ровно один модуль — единый конвейер
+    `canonchange.canon_change` (проверки git → запись → экспорт → линт → коммит/«незакоммичено»).
+    Канонист, круги истории, панель и `canon-commit` идут через него; новых открывателей быть не должно."""
+    openers = []
+    for path in sorted(UGAR.glob("*.py")):
+        if path.name == "guard.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name == "canon_write_session":
+                openers.append(f"{path.name}:{node.lineno}")
+    assert [o.split(":")[0] for o in openers] == ["canonchange.py"], openers
 
 
 def test_детерминированность_между_процессами(ws, library):

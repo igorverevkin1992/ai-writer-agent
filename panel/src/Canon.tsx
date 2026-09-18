@@ -20,8 +20,10 @@ export function Canon(props: {
   notify: Notify;
   confirm: Confirm;
   refreshTick: number;
+  /** незакоммиченные файлы библиотеки (из /api/state): правки ждут «Закоммитить канон» */
+  uncommitted: string[];
 }) {
-  const { busy: jobBusy, runCommand, notify, confirm, refreshTick } = props;
+  const { busy: jobBusy, runCommand, notify, confirm, refreshTick, uncommitted } = props;
   const [docs, setDocs] = useState<CanonDoc[]>([]);
   const [current, setCurrent] = useState<Doc | null>(null);
   const [lint, setLint] = useState<LintData | null>(null);
@@ -286,6 +288,12 @@ export function Canon(props: {
           value={commitMsg} onChange={(e) => setCommitMsg(e.target.value)} aria-label="Сообщение коммита" />
         <button disabled={busy || !commitMsg.trim()} onClick={commit}>Закоммитить канон</button>
       </div>
+      {uncommitted.length > 0 && (
+        <p className="muted" title={uncommitted.join("\n")}>
+          <span className="bad">Не закоммичено: {uncommitted.length} файл(ов)</span> — {uncommitted.slice(0, 5).join(", ")}
+          {uncommitted.length > 5 ? "…" : ""}. Правки сохранены на диске и проверены; закоммитьте их с сообщением выше.
+        </p>
+      )}
 
       <div className="canon-layout">
         <div className="canon-docs" role="list" aria-label="Документы канона">
