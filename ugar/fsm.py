@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from . import guard
+from . import guard, timing
 from .paths import Workspace
 
 STATES = [
@@ -117,9 +117,11 @@ class ChapterState:
         self._move(to, cmd)
 
     def _record(self, frm: str, to: str, cmd: str) -> None:
-        self.data.setdefault("история", []).append(
-            {"из": frm, "в": to, "время": datetime.now(timezone.utc).isoformat(), "команда": cmd}
-        )
+        rec = {"из": frm, "в": to, "время": datetime.now(timezone.utc).isoformat(), "команда": cmd}
+        if timing.current_job:
+            # переходы одной задачи (run, кнопка панели) → интервал между ними машинный (timing.py)
+            rec["задача"] = timing.current_job
+        self.data.setdefault("история", []).append(rec)
 
     def _move(self, to: str, cmd: str) -> None:
         self._record(self.state, to, cmd)

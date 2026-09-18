@@ -214,7 +214,7 @@ def test_вопросы_к_решениям_автора(real):
     assert "реестр §1 — т. 2" in messages and "таблица 03 — т. 4" in messages and "досье — т. 4" in messages
     assert "объём тома: 46 глав" in messages and "520–560 стр." in messages  # 7.3
     assert "Ф-1926-10" in messages and "гл. 31" in messages                  # 7.7
-    assert "Р-001…Р-014" in messages and "Р-022" in messages                 # 7.11
+    assert "Р-001…Р-014" in messages and "Р-023" in messages                 # 7.11 (журнал дошёл до Р-023)
 
 
 @real_only

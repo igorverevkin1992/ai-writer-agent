@@ -290,14 +290,17 @@ def test_цикл_правок_стартует_от_базы_приёмки(ws,
     ws.chapter_dir(n).joinpath("flags.json").write_text("[]", encoding="utf-8")
     assert runner.invoke(app, ["review", str(n)]).exit_code == 0
     assert ChapterState(ws, n).data["база_приёмки"] == 1
-    (ws.chapter_dir(n) / "edits.md").write_text("БЫЛО: Вторая фраза.\nСТАЛО: Другая фраза.\n", encoding="utf-8")
+    # пара применяется кодом (Р-023), указание уходит Писателю — от промежуточного текста
+    (ws.chapter_dir(n) / "edits.md").write_text(
+        "БЫЛО: Вторая фраза.\nСТАЛО: Другая фраза.\n\nУКАЗАНИЕ: оживить финал\n", encoding="utf-8"
+    )
     # «Писатель» вносит правку и добавляет самоволие
     calls: list[int] = []
 
-    def fake_apply(ws_, cfg, chapter, base_k, edits, new_k=None):
+    def fake_apply(ws_, cfg, chapter, base_k, edits, new_k=None, base_text=None, **kw):
         calls.append(base_k)
-        text = ws_.draft_path(chapter, base_k).read_text(encoding="utf-8").replace("Вторая фраза.", "Другая фраза.")
-        text = text.replace("Третья фраза.", "Третья фраза. Самовольная вставка.")
+        assert "Другая фраза." in base_text and [e.seq for e in edits] == [2]  # кодовая правка уже в тексте
+        text = base_text.replace("Третья фраза.", "Третья фраза. Самовольная вставка.")
         from ugar import writer
         writer._save_draft(ws_, chapter, new_k, text, cfg, mode="правки")
         return new_k

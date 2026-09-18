@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -18,6 +19,7 @@ import typer
 
 from . import (
     adapters,
+    cancel,
     canonist,
     compiler,
     dashboard as dashboard_mod,
@@ -26,6 +28,7 @@ from . import (
     guard,
     regression as regression_mod,
     review as review_mod,
+    timing,
     verifier1,
     verifier2,
     writer,
@@ -63,25 +66,50 @@ def _manual(e: adapters.ManualModeNeeded) -> None:
     raise typer.Exit(code=2)
 
 
+def _opt(value, default):
+    """Прямой вызов команды из кода (панель, `run`) без аргумента оставляет typer.OptionInfo —
+    он истинен; такие значения считаем неуказанными."""
+    return default if isinstance(value, typer.models.OptionInfo) else value
+
+
+_NOT_A_JOB = {"cmd_panel"}
+
+
 def _friendly(fn):
     """Ожидаемые ошибки (нет файла, структура MD, недопустимый переход FSM) —
     читаемое сообщение вместо трейсбека. UGAR_DEBUG=1 — полный трейсбек (для разбора
-    программных ошибок, 2.11)."""
+    программных ошибок, 2.11).
+
+    Внешняя команда — одна задача для учёта времени такта (`timing.job`): переходы FSM внутри
+    неё помечаются её идентификатором, интервалы между ними считаются машинными; вложенные
+    команды (`run` → `write` → …) наследуют задачу. Остановка автором (`cancel.Cancelled`) —
+    сообщение без трейсбека, код выхода 2 (как ручной режим: глава на последнем завершённом шаге)."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except (typer.Exit, typer.Abort):
-            raise  # собственные коды выхода — не ошибка
-        except adapters.ManualModeNeeded as e:
-            if os.environ.get("UGAR_DEBUG") == "1":
-                raise
-            _manual(e)
-        except (FileNotFoundError, MarkupError, TransitionError, RuntimeError, ValueError) as e:
-            if os.environ.get("UGAR_DEBUG") == "1":
-                raise
-            _fail(str(e))
+        outermost = timing.current_job is None
+        if outermost:
+            cancel.clear()  # запрос отмены прошлой задачи не должен останавливать новую
+        # сервер панели живёт часами — сам он не задача: задачи заводят команды, которые он вызывает
+        job_ctx = contextlib.nullcontext() if fn.__name__ in _NOT_A_JOB else timing.job(fn.__name__.removeprefix("cmd_"))
+        with job_ctx:
+            try:
+                return fn(*args, **kwargs)
+            except (typer.Exit, typer.Abort):
+                raise  # собственные коды выхода — не ошибка
+            except adapters.ManualModeNeeded as e:
+                if os.environ.get("UGAR_DEBUG") == "1":
+                    raise
+                _manual(e)
+            except cancel.Cancelled as e:
+                if not outermost:
+                    raise  # до внешней команды: она печатает и завершает
+                typer.secho(f"⏹ {e}", fg=typer.colors.YELLOW)
+                raise typer.Exit(code=2)
+            except (FileNotFoundError, MarkupError, TransitionError, RuntimeError, ValueError) as e:
+                if os.environ.get("UGAR_DEBUG") == "1":
+                    raise
+                _fail(str(e))
 
     return wrapper
 
@@ -147,18 +175,46 @@ def cmd_write(
     manual: bool = typer.Option(
         False, "--manual", help="Зарегистрировать черновик, сохранённый вручную как draft_{k+1}.md (NFR-3)."
     ),
+    variants: int = typer.Option(
+        1, "--варианты", "--variants", min=1, max=4,
+        help="A/B: столько вызовов Писателя по одному окну → draft_k.md, draft_k.alt1.md …; метрики Э1 рядом (варианты.json).",
+    ),
+    choose: str | None = typer.Option(
+        None, "--выбрать", "--choose", help="Сделать вариант (alt1, alt0 — прежний основной) текущим draft_k.md; состояние не меняется.",
+    ),
 ) -> None:
-    """Отправить окно Писателю, сохранить draft_k.md (FR-W1)."""
+    """Отправить окно Писателю, сохранить draft_k.md (FR-W1). `--варианты 2` — A/B, `--выбрать alt1` — выбор варианта."""
     ws, cfg, lib = _ctx()
+    variants = int(_opt(variants, 1))
+    choose = _opt(choose, None)
+    manual = _opt(manual, False)
     st = ChapterState(ws, chapter)
+    if choose:
+        st.require("сгенерировано")
+        writer.choose_variant(ws, chapter, st.draft, choose)
+        typer.secho(f"Вариант «{choose}» → draft_{st.draft}.md (прежний основной — alt0). Далее: `ugar verify1 {chapter}`.",
+                    fg=typer.colors.GREEN)
+        return
     st.require("собрано", "сгенерировано")
     k = st.draft + 1
+    labels = writer.variant_labels(variants)
     if manual:
-        if not ws.draft_path(chapter, k).exists():
+        missing = [writer.variant_path(ws, chapter, k, lb).name for lb in labels if not writer.variant_path(ws, chapter, k, lb).exists()]
+        if missing:
             _fail(
-                f"нет файла {ws.draft_path(chapter, k)} — скопируйте окно в чат модели, "
+                f"нет файла chapters/{chapter:03d}/{missing[0]} — скопируйте окно в чат модели, "
                 f"сохраните ответ этим файлом и повторите (ручной режим)."
             )
+    elif variants > 1:
+        try:
+            writer.write_variants(ws, cfg, chapter, k, variants)
+        except adapters.ManualModeNeeded as e:
+            typer.echo(
+                f"Окно для всех вариантов одно: chapters/{chapter:03d}/window.md — прогоните его {variants} раз(а), "
+                f"сохраните ответы как {', '.join(writer.variant_path(ws, chapter, k, lb).name for lb in labels)} "
+                f"и выполните `ugar write {chapter} --manual --варианты {variants}`."
+            )
+            _manual(e)
     else:
         try:
             writer.write_chapter(ws, cfg, chapter, k)
@@ -166,8 +222,32 @@ def cmd_write(
             _manual(e)
     st.set_draft(k)
     st.reset_retries()  # свежая генерация — бюджет авто-повторов §5.4 заново
-    st.transition("сгенерировано", "write" + (" (manual)" if manual else ""))
+    st.transition("сгенерировано", "write" + (" (manual)" if manual else "") + (f" (варианты: {variants})" if variants > 1 else ""))
     typer.secho(f"Черновик {'принят' if manual else 'получен'}: {ws.draft_path(chapter, k)}", fg=typer.colors.GREEN)
+    if variants > 1:
+        summary = verifier1.variants_summary(ws, chapter, k, labels)
+        _print_variants(summary)
+        typer.echo(f"Основной — draft_{k}.md; выбрать другой: `ugar write {chapter} --выбрать alt1`.")
+
+
+def _print_variants(summary: dict) -> None:
+    """Таблица метрик Э1 по вариантам: строки — проверки, столбцы — варианты."""
+    rows = summary.get("варианты", [])
+    if not rows:
+        return
+    typer.echo("Метрики Э1 по вариантам (chapters/N/варианты.json):")
+    typer.echo(f"  {'проверка':<28}" + "".join(f"{r['вариант']:>16}" for r in rows))
+    typer.echo(f"  {'слов':<28}" + "".join(f"{r['слов']:>16}" for r in rows))
+    typer.echo(f"  {'брак / флагов':<28}" + "".join(f"{str(r['брак']) + ' / ' + str(r['флагов']):>16}" for r in rows))
+    ids: list[str] = []
+    for r in rows:
+        ids += [i for i in r["метрики"] if i not in ids]
+    for check_id in ids:
+        cells = []
+        for r in rows:
+            m = r["метрики"].get(check_id)
+            cells.append(f"{(m['actual'] + ' ' + m['status']) if m else '—':>16}")
+        typer.echo(f"  {check_id[:28]:<28}" + "".join(cells))
 
 
 def _print_verdict(verdict) -> None:
@@ -200,6 +280,7 @@ def cmd_verify1(chapter: int) -> None:
             )
             raise typer.Exit(code=1)
         typer.secho(f"БРАК метрик — авто-повтор генерации №{retries} (§5.4)…", fg=typer.colors.YELLOW)
+        cancel.check(f"авто-повтор Э1 №{retries}")
         k = st.draft + 1
         try:
             writer.write_chapter(ws, cfg, chapter, k)
@@ -214,10 +295,19 @@ def cmd_verify2(
     chapter: int,
     manual: bool = typer.Option(False, "--manual", help="Принять flags.json, заполненный вручную (NFR-3)."),
     taste: bool = typer.Option(False, "--вкус", "--taste", help="Дополнительно: советы по вкусу автора (02 §6.1) — не блокируют приёмку."),
+    again: bool = typer.Option(
+        False, "--повторно", "--после-правок", "--again",
+        help="Повторный Э2 по текущему черновику после правок (из «правки»/«дифф-контроль»): совещательно — "
+             "flags_повторно.json и раздел в review.md; FSM, flags.json и решения не меняются.",
+    ),
 ) -> None:
-    """Смысловые проверки Э2 (FR-V2.*)."""
+    """Смысловые проверки Э2 (FR-V2.*). `--повторно` — второй прогон после правок (advisory)."""
     ws, cfg, lib = _ctx()
+    manual, taste, again = _opt(manual, False), _opt(taste, False), _opt(again, False)
     st = ChapterState(ws, chapter)
+    if again:
+        _verify2_again(ws, cfg, st, manual)
+        return
     st.require("верифицировано-1")
     if manual:
         if not (ws.chapter_dir(chapter) / "flags.json").exists():
@@ -251,6 +341,41 @@ def cmd_verify2(
             typer.secho(f"⚠ Вкус: {e}", fg=typer.colors.YELLOW)
 
 
+def _verify2_again(ws: Workspace, cfg: Config, st: ChapterState, manual: bool) -> None:
+    """Повторный Э2 после правок (аудит 2, п. 24а): по текущему черновику, без смены состояния."""
+    chapter = st.chapter
+    st.require("правки", "дифф-контроль")
+    if manual:
+        if not (ws.chapter_dir(chapter) / verifier2.AGAIN_FLAGS).exists():
+            _fail(
+                f"нет файла chapters/{chapter:03d}/{verifier2.AGAIN_FLAGS} — сохраните в него JSON-ответ модели "
+                f"(промпт: {verifier2.AGAIN_PROMPT}), затем повторите `ugar verify2 {chapter} --повторно --manual`."
+            )
+        draft_k, flags = verifier2.load_flags_again(ws, chapter)
+        if draft_k is None:
+            verifier2.save_flags_again(ws, chapter, flags, st.draft)
+        typer.echo(f"Принят ручной {verifier2.AGAIN_FLAGS}: {len(flags)} флагов.")
+    else:
+        try:
+            flags = verifier2.run_verify2_again(ws, cfg, chapter, st.draft)
+        except adapters.ManualModeNeeded as e:
+            typer.echo(
+                f"Промпт сохранён: chapters/{chapter:03d}/{verifier2.AGAIN_PROMPT} — прогоните вручную, "
+                f"сохраните JSON в chapters/{chapter:03d}/{verifier2.AGAIN_FLAGS} и выполните "
+                f"`ugar verify2 {chapter} --повторно --manual`."
+            )
+            _manual(e)
+    review_mod.append_second_pass(ws, chapter, st.draft, flags)
+    sam = sum(1 for f in flags if f.kind == "samovolka")
+    typer.secho(
+        f"Повторный Э2 (черновик {st.draft}, совещательно): {len(flags)} флагов, из них самоволок: {sam} → "
+        f"chapters/{chapter:03d}/{verifier2.AGAIN_FLAGS}; состояние «{st.state}» не изменено.",
+        fg=typer.colors.GREEN,
+    )
+    for f in flags[:12]:
+        typer.echo(f"  - [{f.kind}/{f.severity}] {f.flag_id} · {f.type}: {f.rule}")
+
+
 @app.command("review", rich_help_panel="Такт главы")
 @_friendly
 def cmd_review(chapter: int) -> None:
@@ -278,21 +403,28 @@ def cmd_apply_edits(
     chapter: int,
     manual: bool = typer.Option(False, "--manual", help="Черновик с правками сохранён вручную как draft_{k+1}.md."),
 ) -> None:
-    """Внесение правок Писателем (FR-W2, FR-E3)."""
+    """Внесение правок: дословные БЫЛО/СТАЛО — кодом (Р-023), свободные указания — Писателем (FR-W2, FR-E3)."""
     ws, cfg, lib = _ctx()
+    manual = _opt(manual, False)
     st = ChapterState(ws, chapter)
     st.require("на-приёмке", "дифф-контроль")
-    if not manual and st.data.get("итераций_правок", 0) >= cfg.edit_cycle_max_iterations:
+    edits = review_mod.parse_edits_md(ws, chapter)
+    # база правок — черновик приёмки (FR-E3): повторный цикл не наследует самоволия прошлой итерации
+    base = int(st.data.get("база_приёмки", st.draft))
+    new_k = st.draft + 1
+    base_path = ws.draft_path(chapter, base)
+    local = None
+    if not manual and base_path.exists():
+        local = writer.apply_edits_text(base_path.read_text(encoding="utf-8"), edits)
+    over = st.data.get("итераций_правок", 0) >= cfg.edit_cycle_max_iterations
+    if not manual and over and (local is None or local.needs_model):
         _fail(
             f"итераций правок уже {st.data['итераций_правок']} (лимит FR-E3) — внесите правки вручную: "
             f"сохраните исправленный текст как draft_{st.draft + 1}.md, выполните "
             f"`ugar apply-edits {chapter} --manual`, затем `ugar diff-check {chapter} --авторская-правка`."
         )
-    edits = review_mod.parse_edits_md(ws, chapter)
-    # база правок — черновик приёмки (FR-E3): повторный цикл не наследует самоволия прошлой итерации
-    base = int(st.data.get("база_приёмки", st.draft))
     st.data["база_правок"] = base
-    new_k = st.draft + 1
+    n_local = n_model = 0
     if manual:
         # завершение сорвавшейся автоматической итерации либо ручная правка автора —
         # бюджет итераций FR-E3 (для циклов Писателя) не расходуется
@@ -300,20 +432,35 @@ def cmd_apply_edits(
             _fail(f"нет файла {ws.draft_path(chapter, new_k)} (ручной режим).")
     elif not edits:
         # правок нет — черновик приёмки переходит дальше без вызова Писателя
-        shutil.copyfile(ws.draft_path(chapter, base), ws.draft_path(chapter, new_k))
+        shutil.copyfile(base_path, ws.draft_path(chapter, new_k))
+    elif local is None:
+        _fail(f"нет базового черновика {base_path} (FR-E3: правки идут от черновика приёмки).")
+    elif not local.needs_model:
+        # Р-023: все пары найдены дословно ровно один раз — модель не нужна, бюджет итераций не расходуется
+        new_k, local = writer.apply_edits_locally(ws, cfg, chapter, base, edits, new_k=new_k)
+        n_local = len(local.applied)
     else:
+        n_local, n_model = len(local.applied), len(local.remaining)
+        for e in local.remaining:
+            typer.echo(f"  Писателю: правка {e.seq} — {local.reasons.get(e.seq, '')}")
         try:
-            new_k = writer.apply_edits(ws, cfg, chapter, base, edits, new_k=new_k)
+            new_k = writer.apply_edits(
+                ws, cfg, chapter, base, local.remaining, new_k=new_k,
+                base_text=local.text, applied_locally=[e.seq for e in local.applied],
+            )
         except adapters.ManualModeNeeded as e:
             typer.echo(
+                f"Правок кодом: {n_local} (уже в тексте промпта), Писателю: {n_model}. "
                 f"Промпт правок сохранён: chapters/{chapter:03d}/apply_edits_prompt.md — прогоните вручную, "
                 f"сохраните ответ как draft_{st.draft + 1}.md и выполните `ugar apply-edits {chapter} --manual`."
             )
             _manual(e)
         st.bump_edit_iterations()  # итерация Писателя состоялась
     st.set_draft(new_k)
-    st.transition("правки", "apply-edits")
-    typer.secho(f"Правки внесены ({len(edits)} шт.) → draft_{new_k}.md. Далее: `ugar diff-check {chapter}`.", fg=typer.colors.GREEN)
+    st.transition("правки", "apply-edits" + (" (manual)" if manual else "") + (" (код)" if n_local and not n_model else ""))
+    how = f"применено кодом {n_local}, Писателю {n_model}" if not manual else "ручной режим"
+    typer.secho(f"Правки внесены ({len(edits)} шт.: {how}) → draft_{new_k}.md. Далее: `ugar diff-check {chapter}`.",
+                fg=typer.colors.GREEN)
 
 
 @app.command("diff-check", rich_help_panel="Такт главы")
@@ -512,6 +659,7 @@ def cmd_status(
         e1, e2 = _chapter_flags_summary(ws, st.chapter)
         hint = NEXT_STEP.get(st.state, "").format(n=st.chapter)
         typer.echo(f"{st.chapter:>6} | {st.state:<18} | {st.draft:>7} | {e1:<16} | {e2:<22} | {hint}")
+    typer.echo(f"Сегодня: {timing.today_author_minutes(ws):g} мин автора (ожидание действий автора по всем главам).")
 
 
 def _status_detail(ws: Workspace, chapter: int) -> None:
@@ -1105,6 +1253,7 @@ def cmd_run(chapter: int) -> None:
     while True:
         st = ChapterState(ws, chapter)
         state = st.state
+        cancel.check(f"такт, состояние «{state}»")  # между шагами: глава остаётся на завершённом шаге
         if state == "не-начато":
             cmd_compile(chapter)
         elif state == "собрано":

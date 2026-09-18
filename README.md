@@ -82,11 +82,13 @@ Node автору не нужен; исходники — в `panel/` (Vite + Re
 ugar run 7          # весь такт с паузами на шагах автора (FR-O1), либо по шагам:
 ugar export         # MD-библиотека → exports/*.json (FR-X1…X3)
 ugar compile 7      # окно контекста по шаблону v1.1 (FR-C1…C6)
-ugar write 7        # Писатель → chapters/007/draft_1.md (FR-W1)
+ugar write 7        # Писатель → chapters/007/draft_1.md (FR-W1); --варианты 2 — A/B с метриками Э1,
+                    #   --выбрать alt1 — сделать вариант текущим черновиком
 ugar verify1 7      # Э1: формальные проверки; брак → авто-повтор ≤2 (FR-V1.*)
-ugar verify2 7      # Э2: смысловые проверки Claude → flags.json (FR-V2.*); --вкус — советы по 02 §6.1
+ugar verify2 7      # Э2: смысловые проверки Claude → flags.json (FR-V2.*); --вкус — советы по 02 §6.1;
+                    #   --повторно — второй Э2 после правок (совещательно, flags_повторно.json)
 ugar review 7       # пакет приёмки: review.md, edits.md, resolutions.json (FR-E1)
-ugar apply-edits 7  # Писатель вносит правки точно (FR-W2, FR-E3)
+ugar apply-edits 7  # дословные БЫЛО/СТАЛО — кодом (Р-023), указания — Писателем (FR-W2, FR-E3)
 ugar diff-check 7   # дифф-контроль: внесено / не внесено / самоволия (FR-V1.10)
 ugar accept 7       # приёмка автором — только из «дифф-контроль: чисто» (FR-E4)
 ugar canonize 7     # пакет записей в канон на подпись (FR-K1)

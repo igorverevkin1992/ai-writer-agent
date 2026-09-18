@@ -150,7 +150,8 @@ def test_manual_apply_edits_не_тратит_итерации(ws, monkeypatch):
     d = ws.chapter_dir(2)
     ws.draft_path(2, 1).write_text("Черновик два.", encoding="utf-8")
     st.set_draft(1)
-    (d / "edits.md").write_text("БЫЛО: Черновик два.\nСТАЛО: Черновик два с правкой.\n", encoding="utf-8")
+    # свободное указание — нужна модель (дословную пару применил бы код, Р-023)
+    (d / "edits.md").write_text("УКАЗАНИЕ: добавить в конец слово «правкой».\n", encoding="utf-8")
 
     # автоматический запуск без API: код 2, бюджет не потрачен
     r = runner.invoke(app, ["apply-edits", "2"])

@@ -164,18 +164,17 @@ def _matching_runs(text_tokens: list[str], target_ngrams: set[tuple], n: int) ->
     return runs[:MAX_QUOTES]
 
 
-def run_verify1(ws: Workspace, chapter: int, draft: int) -> Verdict:
+def analyze_text(ws: Workspace, chapter: int, raw: str) -> list[CheckResult]:
+    """Проверки Э1 для произвольного текста главы в контексте рабочей области (без записи вердикта):
+    нормы и стоп-листы из выгрузок, окно главы, корпус части — как в run_verify1."""
     exports_dir = ws.exports
     norms = exporter.load_norms(exports_dir)
     stoplists = exporter.load_stoplists(exports_dir)
     brief = exporter.load_brief(exports_dir, chapter)
-
-    raw = ws.draft_path(chapter, draft).read_text(encoding="utf-8")
     window_path = ws.window_path(chapter)
     window_raw = window_path.read_text(encoding="utf-8") if window_path.exists() else ""
-
     own = exporter.find_corpus_file(ws.corpus, chapter, brief.volume)
-    checks = analyze(
+    return analyze(
         raw,
         window_raw,
         brief,
@@ -186,6 +185,41 @@ def run_verify1(ws: Workspace, chapter: int, draft: int) -> Verdict:
         extra_abbr=ws.root / "сокращения.txt",  # пополняемый словарь (Д-2)
         part_range=part_range_for(ws.exports, chapter),
     )
+
+
+def variants_summary(ws: Workspace, chapter: int, draft: int, labels: list[str] | None = None) -> dict:
+    """A/B (аудит 2, п. 24б): метрики Э1 по каждому варианту черновика draft (draft_k.md, draft_k.alt1.md …)
+    → chapters/N/варианты.json. FSM и verdict.json не трогает."""
+    from . import writer
+
+    labels = labels or writer.existing_variants(ws, chapter, draft)
+    rows = []
+    for label in labels:
+        path = writer.variant_path(ws, chapter, draft, label)
+        if not path.exists():
+            continue
+        checks = analyze_text(ws, chapter, path.read_text(encoding="utf-8"))
+        rows.append(
+            {
+                "вариант": label,
+                "файл": path.name,
+                "слов": len(textutils.words(textutils.narrator_text(path.read_text(encoding="utf-8")))),
+                "брак": sum(1 for c in checks if c.status == "BRAK"),
+                "флагов": sum(1 for c in checks if c.status == "FLAG"),
+                "метрики": {c.check_id: {"status": c.status, "actual": c.actual, "threshold": c.threshold} for c in checks},
+            }
+        )
+    summary = {"глава": chapter, "черновик": draft, "варианты": rows}
+    guard.write_text(
+        ws.chapter_dir(chapter) / "варианты.json",
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+    )
+    return summary
+
+
+def run_verify1(ws: Workspace, chapter: int, draft: int) -> Verdict:
+    raw = ws.draft_path(chapter, draft).read_text(encoding="utf-8")
+    checks = analyze_text(ws, chapter, raw)
     verdict = Verdict(chapter=chapter, draft=draft, checks=checks)
     guard.write_text(
         ws.chapter_dir(chapter) / "verdict.json",

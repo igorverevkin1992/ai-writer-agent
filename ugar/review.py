@@ -101,6 +101,41 @@ def build_review_pack(ws: Workspace, chapter: int, draft: int) -> Path:
     return chdir / "review.md"
 
 
+SECOND_PASS_HEADER = "## Повторный Э2 после правок"
+
+
+def append_second_pass(ws: Workspace, chapter: int, draft: int, flags: list[Flag]) -> Path | None:
+    """Раздел «Повторный Э2 после правок» в review.md (совещательно, приёмку не блокирует);
+    прежний раздел заменяется. Без review.md — ничего не пишет."""
+    path = ws.chapter_dir(chapter) / "review.md"
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+    lines = [SECOND_PASS_HEADER, "", f"Черновик {draft}; совещательно — flags.json и решения по самоволкам не меняет.", ""]
+    if flags:
+        for f in flags:
+            kind = "самоволка" if f.kind == "samovolka" else f.severity
+            lines.append(f"- **[{kind}] {f.flag_id} · {f.type}** — {f.rule}; рекомендация: {f.recommendation}")
+            lines.append(f"  > {f.quote}")
+    else:
+        lines.append("- флагов нет")
+    section = "\n".join(lines) + "\n"
+    if SECOND_PASS_HEADER in text:
+        head, _, tail = text.partition(SECOND_PASS_HEADER)
+        # хвост — до следующего раздела верхнего уровня (или до «---» перед текстом)
+        m = re.search(r"\n(?=## |---\n)", tail)
+        text = head + section + (tail[m.start() + 1:] if m else "")
+    else:
+        marker = "\n---\n"
+        if marker in text:
+            head, _, tail = text.partition(marker)
+            text = head + "\n" + section + marker + tail
+        else:
+            text = text.rstrip("\n") + "\n\n" + section
+    guard.write_text(path, text)
+    return path
+
+
 def rebuild_resolutions(ws: Workspace, chapter: int, samovolki: list[Flag]) -> list[Resolution]:
     res_path = ws.chapter_dir(chapter) / "resolutions.json"
     existing: dict[str, Resolution] = {}

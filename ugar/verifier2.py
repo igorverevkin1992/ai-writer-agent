@@ -192,6 +192,41 @@ def run_verify2(ws: Workspace, cfg: Config, chapter: int, draft: int) -> list[Fl
     return flags
 
 
+AGAIN_FLAGS = "flags_повторно.json"
+AGAIN_PROMPT = "verify2_повторно_prompt.md"
+
+
+def run_verify2_again(ws: Workspace, cfg: Config, chapter: int, draft: int) -> list[Flag]:
+    """Повторный Э2 после правок (аудит 2, п. 24а) — совещательный: тот же промпт по текущему
+    черновику, результат в flags_повторно.json; flags.json, resolutions.json и FSM не трогает."""
+    system, user = build_prompt(ws, chapter, draft)
+    guard.write_text(ws.chapter_dir(chapter) / AGAIN_PROMPT, f"<!-- system -->\n{system}\n\n<!-- user -->\n{user}\n")
+    raw = adapters.call_anthropic(
+        system, user, cfg.verifier2, cfg.api, ws.logs, role="верификатор-2 (повторно)", chapter=chapter
+    )
+    flags = parse_flags(raw)
+    save_flags_again(ws, chapter, flags, draft)
+    return flags
+
+
+def save_flags_again(ws: Workspace, chapter: int, flags: list[Flag], draft: int) -> None:
+    guard.write_text(
+        ws.chapter_dir(chapter) / AGAIN_FLAGS,
+        json.dumps({"черновик": draft, "флаги": [f.model_dump() for f in flags]}, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def load_flags_again(ws: Workspace, chapter: int) -> tuple[int | None, list[Flag]]:
+    """(черновик, флаги) повторного Э2; файл может быть и голым списком (ручной режим)."""
+    path = ws.chapter_dir(chapter) / AGAIN_FLAGS
+    if not path.exists():
+        return None, []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return None, [Flag.model_validate(r) for r in data]
+    return data.get("черновик"), [Flag.model_validate(r) for r in data.get("флаги", [])]
+
+
 def build_taste_prompt(ws: Workspace, chapter: int, draft: int) -> tuple[str, str]:
     """Совещательный проход «вкус» (02 §6.1–6.2): правила вкуса автора + текст главы."""
     from . import mdparse

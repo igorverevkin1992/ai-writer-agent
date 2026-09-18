@@ -135,9 +135,9 @@ def test_run_проходит_правки_и_останавливается_н�
 def test_run_пауза_при_нечистом_диффе(ws, monkeypatch):
     monkeypatch.chdir(ws.root)
     _chapter_at_review(ws, 1)
-    (ws.chapter_dir(1) / "edits.md").write_text("БЫЛО: Вторая фраза.\nСТАЛО: Другая фраза.\n", encoding="utf-8")
+    (ws.chapter_dir(1) / "edits.md").write_text("УКАЗАНИЕ: переписать вторую фразу\n", encoding="utf-8")
 
-    def fake_apply(ws_, cfg, chapter, base_k, edits, new_k=None):
+    def fake_apply(ws_, cfg, chapter, base_k, edits, new_k=None, **kw):
         writer._save_draft(ws_, chapter, new_k, "Первая фраза. Другая фраза. Третья фраза. Самоволие.\n", cfg, mode="правки")
         return new_k
 

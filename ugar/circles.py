@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from . import adapters, exporter, gitops, guard, llmjson, realcanon
+from . import adapters, cancel, exporter, gitops, guard, llmjson, realcanon
 from .config import Config
 from .paths import Workspace
 from .schemas import Act, CircleStep, StoryCircle
@@ -283,6 +283,8 @@ def run(ws: Workspace, cfg: Config, scope: str, chapter: int | None = None, only
         if manual_reason:
             prompts.append(str(prompt_path))
             continue
+        if done:
+            cancel.check(f"круги истории: перед «{title}»")  # между вызовами модели; готовые круги остаются
         try:
             raw = adapters.call_anthropic(system, user, cfg.canonist, cfg.api, ws.logs, role="аналитик (круг истории)")
             circle = llmjson.extract_json(raw, dict)
