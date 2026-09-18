@@ -197,7 +197,7 @@ def cmd_compile(chapter: int) -> None:
     if (ws.chapter_dir(chapter) / "window_size_флаг.md").exists() and size > cfg.window_soft_limit_chars:
         typer.secho(
             f"⚠ Превышен мягкий лимит окна {cfg.window_soft_limit_chars} символов (Д-12) — "
-            f"раскладка в chapters/{chapter:03d}/window_size_флаг.md",
+            f"раскладка в {ws.chapter_rel(chapter)}/window_size_флаг.md",
             fg=typer.colors.YELLOW,
         )
 
@@ -236,7 +236,7 @@ def cmd_write(
         missing = [writer.variant_path(ws, chapter, k, lb).name for lb in labels if not writer.variant_path(ws, chapter, k, lb).exists()]
         if missing:
             _fail(
-                f"нет файла chapters/{chapter:03d}/{missing[0]} — скопируйте окно в чат модели, "
+                f"нет файла {ws.chapter_rel(chapter)}/{missing[0]} — скопируйте окно в чат модели, "
                 f"сохраните ответ этим файлом и повторите (ручной режим)."
             )
     elif variants > 1:
@@ -244,7 +244,7 @@ def cmd_write(
             writer.write_variants(ws, cfg, chapter, k, variants)
         except adapters.ManualModeNeeded as e:
             typer.echo(
-                f"Окно для всех вариантов одно: chapters/{chapter:03d}/window.md — прогоните его {variants} раз(а), "
+                f"Окно для всех вариантов одно: {ws.chapter_rel(chapter)}/window.md — прогоните его {variants} раз(а), "
                 f"сохраните ответы как {', '.join(writer.variant_path(ws, chapter, k, lb).name for lb in labels)} "
                 f"и выполните `ugar write {chapter} --manual --варианты {variants}`."
             )
@@ -309,7 +309,7 @@ def cmd_verify1(chapter: int) -> None:
         if retries > cfg.auto_retries_verify1:
             typer.secho(
                 f"БРАК метрик после {cfg.auto_retries_verify1} авто-повторов — стоп, вердикт автору "
-                f"(chapters/{chapter:03d}/verdict.json).",
+                f"({ws.chapter_rel(chapter)}/verdict.json).",
                 fg=typer.colors.RED,
             )
             raise typer.Exit(code=1)
@@ -346,7 +346,7 @@ def cmd_verify2(
     if manual:
         if not (ws.chapter_dir(chapter) / "flags.json").exists():
             _fail(
-                f"нет файла chapters/{chapter:03d}/flags.json — сохраните в него JSON-ответ модели "
+                f"нет файла {ws.chapter_rel(chapter)}/flags.json — сохраните в него JSON-ответ модели "
                 f"(промпт: verify2_prompt.md), затем повторите `ugar verify2 {chapter} --manual`."
             )
         flags = verifier2.load_flags(ws, chapter)
@@ -356,8 +356,8 @@ def cmd_verify2(
             flags = verifier2.run_verify2(ws, cfg, chapter, st.draft)
         except adapters.ManualModeNeeded as e:
             typer.echo(
-                f"Промпт сохранён: chapters/{chapter:03d}/verify2_prompt.md — прогоните вручную, "
-                f"сохраните JSON в chapters/{chapter:03d}/flags.json и выполните `ugar verify2 {chapter} --manual`."
+                f"Промпт сохранён: {ws.chapter_rel(chapter)}/verify2_prompt.md — прогоните вручную, "
+                f"сохраните JSON в {ws.chapter_rel(chapter)}/flags.json и выполните `ugar verify2 {chapter} --manual`."
             )
             _manual(e)
         except ValueError as e:
@@ -368,9 +368,9 @@ def cmd_verify2(
     if taste:
         try:
             advice = verifier2.run_taste(ws, cfg, chapter, st.draft)
-            typer.echo(f"Вкус (совещательно, 02 §6.1): замечаний {len(advice)} → chapters/{chapter:03d}/taste.json")
+            typer.echo(f"Вкус (совещательно, 02 §6.1): замечаний {len(advice)} → {ws.chapter_rel(chapter)}/taste.json")
         except adapters.ManualModeNeeded:
-            typer.echo(f"Промпт вкуса сохранён: chapters/{chapter:03d}/taste_prompt.md (ответ — в taste.json).")
+            typer.echo(f"Промпт вкуса сохранён: {ws.chapter_rel(chapter)}/taste_prompt.md (ответ — в taste.json).")
         except ValueError as e:
             typer.secho(f"⚠ Вкус: {e}", fg=typer.colors.YELLOW)
 
@@ -382,7 +382,7 @@ def _verify2_again(ws: Workspace, cfg: Config, st: ChapterState, manual: bool) -
     if manual:
         if not (ws.chapter_dir(chapter) / verifier2.AGAIN_FLAGS).exists():
             _fail(
-                f"нет файла chapters/{chapter:03d}/{verifier2.AGAIN_FLAGS} — сохраните в него JSON-ответ модели "
+                f"нет файла {ws.chapter_rel(chapter)}/{verifier2.AGAIN_FLAGS} — сохраните в него JSON-ответ модели "
                 f"(промпт: {verifier2.AGAIN_PROMPT}), затем повторите `ugar verify2 {chapter} --повторно --manual`."
             )
         draft_k, flags = verifier2.load_flags_again(ws, chapter)
@@ -394,8 +394,8 @@ def _verify2_again(ws: Workspace, cfg: Config, st: ChapterState, manual: bool) -
             flags = verifier2.run_verify2_again(ws, cfg, chapter, st.draft)
         except adapters.ManualModeNeeded as e:
             typer.echo(
-                f"Промпт сохранён: chapters/{chapter:03d}/{verifier2.AGAIN_PROMPT} — прогоните вручную, "
-                f"сохраните JSON в chapters/{chapter:03d}/{verifier2.AGAIN_FLAGS} и выполните "
+                f"Промпт сохранён: {ws.chapter_rel(chapter)}/{verifier2.AGAIN_PROMPT} — прогоните вручную, "
+                f"сохраните JSON в {ws.chapter_rel(chapter)}/{verifier2.AGAIN_FLAGS} и выполните "
                 f"`ugar verify2 {chapter} --повторно --manual`."
             )
             _manual(e)
@@ -403,7 +403,7 @@ def _verify2_again(ws: Workspace, cfg: Config, st: ChapterState, manual: bool) -
     sam = sum(1 for f in flags if f.kind == "samovolka")
     typer.secho(
         f"Повторный Э2 (черновик {st.draft}, совещательно): {len(flags)} флагов, из них самоволок: {sam} → "
-        f"chapters/{chapter:03d}/{verifier2.AGAIN_FLAGS}; состояние «{st.state}» не изменено.",
+        f"{ws.chapter_rel(chapter)}/{verifier2.AGAIN_FLAGS}; состояние «{st.state}» не изменено.",
         fg=typer.colors.GREEN,
     )
     for f in flags[:12]:
@@ -485,7 +485,7 @@ def cmd_apply_edits(
         except adapters.ManualModeNeeded as e:
             typer.echo(
                 f"Правок кодом: {n_local} (уже в тексте промпта), Писателю: {n_model}. "
-                f"Промпт правок сохранён: chapters/{chapter:03d}/apply_edits_prompt.md — прогоните вручную, "
+                f"Промпт правок сохранён: {ws.chapter_rel(chapter)}/apply_edits_prompt.md — прогоните вручную, "
                 f"сохраните ответ как draft_{st.draft + 1}.md и выполните `ugar apply-edits {chapter} --manual`."
             )
             _manual(e)
@@ -594,7 +594,7 @@ def cmd_canonize(
             current = _sha256(batch_path)
             if st.data.get("пакет_хэш") != current:
                 _fail(
-                    f"пакет chapters/{chapter:03d}/canon_batch.md уже правился автором — "
+                    f"пакет {ws.chapter_rel(chapter)}/canon_batch.md уже правился автором — "
                     f"примените его (`ugar canonize {chapter} --apply`) или пересоберите явно "
                     f"(`ugar canonize {chapter} --заново`, правки пропадут)."
                 )
