@@ -160,9 +160,9 @@ def test_отмена_задачи_через_api(panel):
 
 
 def test_отмена_через_friendly_тоже_остановлено(panel):
-    """Команды CLI обёрнуты _friendly: Cancelled (RuntimeError) там превращается в Exit(1) —
+    """Задача завершилась ошибкой шага (StepError, код 1) уже после запроса остановки —
     по флагу cancel_requested сервер всё равно показывает «остановлено», а не «ошибка»."""
-    import typer
+    from ugar.steps import StepError
 
     port, api = panel
     reached = threading.Event()
@@ -172,7 +172,7 @@ def test_отмена_через_friendly_тоже_остановлено(panel)
         while not cancel.requested():
             time.sleep(0.02)
         cancel.clear()
-        raise typer.Exit(code=1)  # так делает _fail
+        raise StepError("остановлено между вызовами")  # ожидаемая ошибка шага, код 1
 
     api.jobs.start("write", 1, job)
     assert reached.wait(2)

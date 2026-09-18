@@ -14,15 +14,12 @@ from pathlib import Path
 
 from .apilog import log_call
 from .config import ApiConfig, ModelConfig
+from .errors import ManualMode
 
 
-class ManualModeNeeded(RuntimeError):
-    """API недоступен — конвейер деградирует в ручной режим (NFR-3)."""
-
-    def __init__(self, reason: str, hint: str):
-        super().__init__(f"{reason}\n\nРучной режим: {hint}")
-        self.reason = reason
-        self.hint = hint
+# API недоступен — конвейер деградирует в ручной режим (NFR-3). Класс живёт в ugar/errors.py
+# (семейство StepError: интерфейсы переводят его в код возврата 2); здесь — прежнее имя.
+ManualModeNeeded = ManualMode
 
 
 def _estimate_cost(mc: ModelConfig, tokens_in: int | None, tokens_out: int | None) -> float | None:

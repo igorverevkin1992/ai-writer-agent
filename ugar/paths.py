@@ -15,7 +15,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Workspace:
     """Пути рабочей области. Корень — папка проекта автора (где лежит config.yaml).
-    `volume` — текущий том (из config.yaml, выставляется в `cli._ctx()`); по умолчанию 1."""
+    `volume` — текущий том (из config.yaml, выставляется в `steps.common._ctx()`); по умолчанию 1."""
 
     root: Path
     volume: int = 1

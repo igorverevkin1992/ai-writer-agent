@@ -48,7 +48,9 @@ def test_нет_записи_файлов_мимо_guard():
     и вызовы git через subprocess вне gitops.py допустимы только в перечисленных функциях, и все они
     работают вне библиотеки (init копирует демо-библиотеку до её защиты, компиляция окна — во временной папке)."""
     allowed = {
-        "cli.py": {"cmd_init", "cmd_retest", "cmd_apply_edits", "_compile_window_to"},
+        "steps/setup.py": {"init"},
+        "steps/canon.py": {"retest", "_compile_window_to"},
+        "steps/tact.py": {"apply_edits"},
         # переезд библиотеки целиком (папка переносится, содержимое документов не меняется; по подтверждению автора)
         "backup.py": {"split_library"},
     }
@@ -57,9 +59,10 @@ def test_нет_записи_файлов_мимо_guard():
     os_only = {"replace", "remove", "rename", "unlink", "rmdir", "removedirs", "renames"}
     any_owner = {"unlink", "rmdir", "rename"}  # методов с такими именами у str/dict/set нет — это Path
     offenders = []
-    for path in sorted(UGAR.glob("*.py")):
+    for path in sorted(UGAR.rglob("*.py")):
         if path.name == "guard.py":
             continue
+        rel = path.relative_to(UGAR).as_posix()
         src = path.read_text(encoding="utf-8")
         tree = ast.parse(src)
         spans = _enclosing_functions(tree)
@@ -85,8 +88,8 @@ def test_нет_записи_файлов_мимо_guard():
                 argv = first.elts if isinstance(first, (ast.List, ast.Tuple)) else []
                 if argv and isinstance(argv[0], ast.Constant) and argv[0].value == "git":
                     raw_write = True  # git над библиотекой — только через gitops
-            if raw_write and spans.get(node.lineno) not in allowed.get(path.name, set()):
-                offenders.append(f"{path.name}:{node.lineno}: {name}")
+            if raw_write and spans.get(node.lineno) not in allowed.get(rel, set()):
+                offenders.append(f"{rel}:{node.lineno}: {name}")
     assert not offenders, "\n".join(offenders)
 
 
@@ -95,7 +98,7 @@ def test_сессию_записи_в_канон_открывает_только
     `canonchange.canon_change` (проверки git → запись → экспорт → линт → коммит/«незакоммичено»).
     Канонист, круги истории, панель и `canon-commit` идут через него; новых открывателей быть не должно."""
     openers = []
-    for path in sorted(UGAR.glob("*.py")):
+    for path in sorted(UGAR.rglob("*.py")):
         if path.name == "guard.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -105,7 +108,7 @@ def test_сессию_записи_в_канон_открывает_только
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             if name == "canon_write_session":
-                openers.append(f"{path.name}:{node.lineno}")
+                openers.append(f"{path.relative_to(UGAR).as_posix()}:{node.lineno}")
     assert [o.split(":")[0] for o in openers] == ["canonchange.py"], openers
 
 

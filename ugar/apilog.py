@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import guard
 
-# Текущий том рабочей области (выставляет `cli._ctx()`): строки журнала несут «volume», чтобы
+# Текущий том рабочей области (выставляет `steps.common._ctx()`): строки журнала несут «volume», чтобы
 # `ugar volume status` считал стоимость по главам тома; старые строки без поля — том 1.
 current_volume: int = 1
 

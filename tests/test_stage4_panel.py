@@ -160,18 +160,19 @@ def test_синхронная_операция_блокирует_задачу_�
 
 def test_двойная_отправка_manual_draft_даёт_один_черновик(panel, ws, library, monkeypatch):
     """5.4/4.4: два одновременных POST manual-draft → второй 400 «дождитесь», draft_2 не появляется."""
-    from ugar import cli, compiler
+    from ugar import compiler
+    from ugar.steps import tact
 
     compiler.compile_window(ws, library, 1)
     ChapterState(ws, 1).transition("собрано", "compile")
 
-    orig = cli.cmd_write
+    orig = tact.write
 
     def slow_write(chapter, manual=False):
         time.sleep(0.7)
         return orig(chapter, manual=manual)
 
-    monkeypatch.setattr(cli, "cmd_write", slow_write)
+    monkeypatch.setattr(tact, "write", slow_write)
 
     results: list[tuple[int, dict]] = []
 
@@ -293,12 +294,12 @@ def test_state_несёт_хвост_лога_а_не_весь(panel, ws):
 
 
 def test_diff_check_author_в_командах(ws, library, monkeypatch):
-    from ugar import cli
+    from ugar.steps import tact
 
     monkeypatch.chdir(ws.root)
     assert "diff-check-author" in server.COMMANDS
     calls: list[tuple] = []
-    monkeypatch.setattr(cli, "cmd_diff_check", lambda chapter, author_fix=False: calls.append((chapter, author_fix)))
+    monkeypatch.setattr(tact, "diff_check", lambda chapter, author_fix=False: calls.append((chapter, author_fix)))
     api = server.PanelAPI(ws, Config(), library)
     api.run_command("diff-check-author", 7)
     deadline = time.time() + 5

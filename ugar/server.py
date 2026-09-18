@@ -1,7 +1,7 @@
 """Локальный сервер панели (этап 3): JSON-API поверх пайплайна + статика React.
 
 Контур остаётся локальным (§1.3): сервер слушает ТОЛЬКО 127.0.0.1, наружу
-ничего не ходит, все операции — те же функции, что у CLI (FSM, guard и
+ничего не ходит, все операции — те же функции ядра `ugar/steps`, что у CLI (FSM, guard и
 подтверждения сохраняются). Защита от чужих сайтов (аудит 4.2/4.3):
 
 * каждый запрос обязан нести `Host: 127.0.0.1:<порт>` или `localhost:<порт>`
@@ -29,13 +29,13 @@ from importlib import resources
 from pathlib import Path
 from typing import Callable
 
-import typer
 from pydantic import ValidationError
 
-from . import cancel, canonchange, exporter, guard, review, timing, verifier2
+from . import cancel, canonchange, exporter, guard, review, steps, timing, verifier2
 from .config import Config
 from .fsm import ChapterState
 from .paths import Workspace
+from .steps import canon, quality, tact
 
 # команды такта, доступные из панели (белый список)
 COMMANDS = {
@@ -161,18 +161,22 @@ class JobRunner:
         except cancel.Cancelled as e:
             buf.write(f"\n{e}")
             status = "остановлено"
-        except typer.Exit as e:
-            code = getattr(e, "exit_code", 1)
-            status = "готово" if code == 0 else ("ручной-режим" if code == 2 else "ошибка")
         except SystemExit as e:
             status = "готово" if not e.code else "ошибка"
         except Exception as e:  # показываем автору, не роняем сервер
-            buf.write(f"\nОШИБКА: {e}")
-            status = "ошибка"
+            expected = steps.outcome(e)  # ожидаемый исход шага: текст как в CLI, статус по коду возврата
+            if expected is None:
+                buf.write(f"\nОШИБКА: {e}")
+                status = "ошибка"
+            else:
+                text, code = expected
+                if text:
+                    buf.write(text + "\n")
+                status = "готово" if code == 0 else ("ручной-режим" if code == 2 else "ошибка")
         finally:
             with self._lock:
-                # автор нажал «Остановить», и задача завершилась не успехом (в т.ч. через
-                # _friendly команды, где Cancelled превращается в Exit(1)) — это остановка, не ошибка
+                # автор нажал «Остановить», и задача завершилась не успехом (в т.ч. ошибкой шага,
+                # в которую превратилась остановка между вызовами) — это остановка, не ошибка
                 if status == "ошибка" and self.job.get("cancel_requested"):
                     status = "остановлено"
                 self.job["status"] = status
@@ -214,15 +218,29 @@ def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
 
 
+def _job(fn, *args, **kwargs):
+    """Вызов функции ядра как задачи: учёт времени такта и сброс запроса отмены (`steps.job_context`),
+    как у команд CLI."""
+    with steps.job_context(getattr(fn, "__name__", "задача")):
+        return fn(*args, **kwargs)
+
+
 def _captured(fn, refusal: str) -> str:
-    """Выполняет функцию CLI с захватом вывода; typer.Exit ≠ 0 → RuntimeError с текстом."""
+    """Выполняет функцию ядра с захватом вывода; ожидаемый исход с кодом ≠ 0 (ошибка шага, ручной режим,
+    недопустимый переход FSM…) → RuntimeError с текстом, как его напечатал бы CLI."""
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             fn()
-    except typer.Exit as e:
-        if getattr(e, "exit_code", 1):
-            raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or refusal)
+    except Exception as e:
+        expected = steps.outcome(e)
+        if expected is None:
+            raise
+        text, code = expected
+        if text:
+            buf.write(text + "\n")
+        if code:
+            raise RuntimeError(_strip_ansi(buf.getvalue()).strip() or refusal) from e
     return _strip_ansi(buf.getvalue())
 
 
@@ -279,7 +297,7 @@ class PanelAPI:
 
     def _chapter_summary(self, n: int) -> tuple[dict, list[tuple]]:
         """Карточка главы для обзора + авторские интервалы (локальная дата конца, секунды) для «сегодня»."""
-        from .cli import NEXT_STEP, _chapter_flags_summary
+        from .steps.common import NEXT_STEP, _chapter_flags_summary
 
         st = ChapterState(self.ws, n)
         e1, e2 = _chapter_flags_summary(self.ws, n)
@@ -416,7 +434,7 @@ class PanelAPI:
             )
         machine_s, author_s = timing.chapter_times(st.data.get("история", []))
         canon_batch = chdir / "canon_batch.md"
-        from .cli import NEXT_STEP
+        from .steps.common import NEXT_STEP
 
         return {
             "chapter": n,
@@ -569,14 +587,13 @@ class PanelAPI:
         if not text.strip():
             raise ValueError("пустой текст черновика")
         from . import guard
-        from .cli import cmd_apply_edits, cmd_write
 
         with self.jobs.exclusive():
             st = ChapterState(self.ws, n)
             if st.state in ("собрано", "сгенерировано"):
-                register = lambda: cmd_write(n, manual=True)  # noqa: E731
+                register = lambda: _job(tact.write, n, manual=True)  # noqa: E731
             elif st.state in ("на-приёмке", "дифф-контроль"):
-                register = lambda: cmd_apply_edits(n, manual=True)  # noqa: E731
+                register = lambda: _job(tact.apply_edits, n, manual=True)  # noqa: E731
             else:
                 raise ValueError(f"из состояния «{st.state}» черновик руками не принимается")
             k = st.draft + 1
@@ -586,30 +603,24 @@ class PanelAPI:
 
     def manual_flags(self, n: int, text: str) -> dict:
         """Ручной режим Э2: вставленный ответ Верификатора-2 → flags.json + verify2 --manual."""
-        from .cli import cmd_verify2
-
         flags = verifier2.parse_flags(text)  # понимает JSON в прозе/```-блоке
         with self.jobs.exclusive():
             st = ChapterState(self.ws, n)
             if st.state != "верифицировано-1":  # проверка ДО перезаписи flags.json (4.6)
                 raise ValueError(f"из состояния «{st.state}» флаги Э2 руками не принимаются")
             verifier2.save_flags(self.ws, n, flags)
-            _captured(lambda: cmd_verify2(n, manual=True), "флаги не приняты")
+            _captured(lambda: _job(tact.verify2, n, manual=True), "флаги не приняты")
         return {"ok": True, "flags": len(flags)}
 
     def accept(self, n: int) -> dict:
         """Приёмка: подтверждение автор дал кнопкой + диалогом в панели (Д-8)."""
-        from .cli import cmd_accept
-
         with self.jobs.exclusive():
-            output = _captured(lambda: cmd_accept(n, yes=True), "приёмка отклонена")
+            output = _captured(lambda: _job(tact.accept, n, yes=True), "приёмка отклонена")
         return {"ok": True, "output": output}
 
     def rollback(self, n: int, to: str | None) -> dict:
-        from .cli import cmd_rollback
-
         with self.jobs.exclusive():
-            output = _captured(lambda: cmd_rollback(n, to=to, yes=True), "откат отклонён")
+            output = _captured(lambda: _job(canon.rollback, n, to=to, yes=True), "откат отклонён")
         return {"ok": True, "output": output}
 
     def circles(self) -> dict:
@@ -818,35 +829,35 @@ class PanelAPI:
             raise ValueError(f"неизвестная команда: {cmd}")
         if chapter is not None and (isinstance(chapter, bool) or not isinstance(chapter, int)):
             raise ValueError("номер главы: целое число")
-        from . import cli
-
         params = params if isinstance(params, dict) else {}
+        # функции ядра (ugar/steps) вызываются напрямую, как обычные; их исключения переводит `_run`
         fns = {
-            "story-circles": lambda: cli.cmd_circles(
-                params.get("scope", "всё"), chapter=params.get("chapter"), redo=bool(params.get("redo")),
+            "story-circles": lambda: _job(
+                quality.circles, params.get("scope", "всё"), chapter=params.get("chapter"), redo=bool(params.get("redo")),
                 to_canon=False, yes=True,
             ),
             # подтверждение автор дал диалогом в панели (Д-8)
-            "circles-canon": lambda: cli.cmd_circles("всё", chapter=None, redo=False, to_canon=True, yes=True),
-            "run": lambda: cli.cmd_run(chapter),  # машинные шаги до паузы автора (FR-O1)
-            "export": lambda: cli.cmd_export(),
-            "compile": lambda: cli.cmd_compile(chapter),
-            "write": lambda: cli.cmd_write(chapter, manual=False),
-            "verify1": lambda: cli.cmd_verify1(chapter),
-            "verify2": lambda: cli.cmd_verify2(chapter, manual=False),
-            "review": lambda: cli.cmd_review(chapter),
-            "apply-edits": lambda: cli.cmd_apply_edits(chapter, manual=False),
-            "diff-check": lambda: cli.cmd_diff_check(chapter, author_fix=False),
+            "circles-canon": lambda: _job(quality.circles, "всё", chapter=None, redo=False, to_canon=True, yes=True),
+            "run": lambda: _job(tact.run, chapter),  # машинные шаги до паузы автора (FR-O1)
+            "export": lambda: _job(tact.export),
+            "compile": lambda: _job(tact.compile, chapter),
+            "write": lambda: _job(tact.write, chapter, manual=False),
+            "verify1": lambda: _job(tact.verify1, chapter),
+            "verify2": lambda: _job(tact.verify2, chapter, manual=False),
+            "review": lambda: _job(tact.review, chapter),
+            "apply-edits": lambda: _job(tact.apply_edits, chapter, manual=False),
+            "diff-check": lambda: _job(tact.diff_check, chapter, author_fix=False),
             # автор правил текст сам — расхождения не самоволия (подтверждено диалогом в панели)
-            "diff-check-author": lambda: cli.cmd_diff_check(chapter, author_fix=True),
-            "regress": lambda: cli.cmd_regress(llm=False),
-            "canonize": lambda: cli.cmd_canonize(chapter, apply=False, yes=True),
+            "diff-check-author": lambda: _job(tact.diff_check, chapter, author_fix=True),
+            "regress": lambda: _job(quality.regress, llm=False),
+            "canonize": lambda: _job(tact.canonize, chapter, apply=False, yes=True),
             # подтверждение автор дал кнопкой + диалогом в панели (Д-8)
-            "canonize-apply": lambda: cli.cmd_canonize(chapter, apply=True, yes=True),
-            "lint": lambda: cli.cmd_lint(llm=False, files=[], watch=False, max_calls=40, strict=False),
-            "lint-llm": lambda: cli.cmd_lint(llm=True, files=list(params.get("files") or []), watch=False, max_calls=40, strict=False),
+            "canonize-apply": lambda: _job(tact.canonize, chapter, apply=True, yes=True),
+            # без --strict: ошибки канона — находки в отчёте, а не «ошибка» задачи
+            "lint": lambda: _job(canon.lint, llm=False, files=[], watch=False, max_calls=40),
+            "lint-llm": lambda: _job(canon.lint, llm=True, files=list(params.get("files") or []), watch=False, max_calls=40),
             # подтверждение автор дал диалогом в панели (Д-8); сообщение — из поля панели
-            "canon-commit": lambda: cli.cmd_canon_commit(message=str(params.get("message") or "правка канона из панели"), yes=True),
+            "canon-commit": lambda: _job(canon.canon_commit, message=str(params.get("message") or "правка канона из панели"), yes=True),
         }
         self.jobs.start(cmd, chapter, fns[cmd])
         return self.jobs.summary()  # type: ignore[return-value]

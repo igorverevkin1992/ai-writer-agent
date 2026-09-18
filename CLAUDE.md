@@ -17,10 +17,21 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
 
 ## Архитектура (кратко)
 
-- `ugar/cli.py` — все команды (`ugar …`); каждый шаг такта — отдельная команда
-  (FR-O2), у долгих есть `--manual` для ручного режима (NFR-3).
+- `ugar/steps/` — ЯДРО шагов (аудит 2, п. 30): логика всех команд без typer — обычные аргументы,
+  печать в stdout, возвращаемые значения и исключения `ugar/errors.py` (`StepError` → «ОШИБКА: …», код 1;
+  `ManualMode` = `adapters.ManualModeNeeded` → ручной режим, код 2; `Rejected` → отказ подтверждения,
+  код 0; `StepExit(code)` → шаг сам всё напечатал). Подтверждения — `yes: bool` + `confirm: Callable[[str], bool] | None`.
+  Модули: `tact` (export … canonize, run), `edits` (resolve/edits/diff), `quality` (check/circles/regress/add_golden),
+  `canon` (lint/snapshot/rollback/retest/canon_commit/backup/library_split), `overview` (status/log/find/doctor/dashboard),
+  `setup` (init), `volume` (volume status/close/open); `common` — `_ctx()` (контекст текущего тома), `NEXT_STEP`,
+  `confirm_or_reject`, печать. `steps.job_context(name)` — задача учёта времени + сброс отмены;
+  `steps.outcome(e)` — (текст, код) для любого ожидаемого исключения, общий для CLI и панели.
+- `ugar/cli.py` — тонкая typer-обёртка: регистрация команд (`ugar …`, имена/опции/панели справки), вызов ядра,
+  единый обработчик `_friendly` (исключения ядра → сообщение и код возврата; `UGAR_DEBUG=1` — трейсбек
+  программных ошибок). Каждый шаг такта — отдельная команда (FR-O2), у долгих есть `--manual` для ручного
+  режима (NFR-3). `NEXT_STEP`, `_ctx`, `_sha256`… реэкспортированы из `steps.common` для совместимости импортов.
 - `ugar/fsm.py` — конечный автомат главы (§5.4), состояние в `chapters/N/status.yaml`.
-- Тома (аудит 2, п. 27): `Config.volume` — текущий том; `cli._ctx()` отдаёт `ws.for_volume(cfg.volume)`;
+- Тома (аудит 2, п. 27): `Config.volume` — текущий том; `steps.common._ctx()` отдаёт `ws.for_volume(cfg.volume)`;
   `Workspace.chapter_dir(n)` → `chapters/001` (том 1, совместимость) или `chapters/Т2/001`;
   `ws.chapter_dirs()` — папки глав текущего тома (server/timing/backup/fsm.all_states идут через него).
   `exporter.run_export(lib, exports, logs, volume)` — выгрузки ВСЕГДА одного тома; документы тома —
@@ -35,7 +46,7 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
   либо результат `uncommitted=True` (панель показывает «Канон: N файлов не закоммичено»,
   `/api/state.canon_uncommitted[_files]`). Сбой writer/экспорта откатывает библиотеку к HEAD, если
   она была чистой на входе. Через него идут `canonist.apply_batch`, `circles.commit_to_canon`,
-  `server.save_canon_doc`/`apply_lint_fix` (без коммита) и `cli.cmd_canon_commit` (writer пуст).
+  `server.save_canon_doc`/`apply_lint_fix` (без коммита) и `steps.canon.canon_commit` (writer пуст).
   Из вида «Канон» нельзя создавать новые файлы в `Проза/` и корне библиотеки (`_canon_path(for_write=True)`).
 - `ugar/exporter.py` — MD-канон → `exports/*.json`; разбирает ВСЁ до записи
   (атомарность). Инкрементально: файл выгрузки пишется только при изменении содержимого, корпус —
@@ -48,7 +59,7 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
   три случая в `doctor`), zip-архив рабочей области с ротацией (`make_archive`; после `canonize --apply`
   при `backup_dir`), переезд библиотеки в отдельный репозиторий (`plan_split`/`split_library`,
   команда `library-split`). Теги приёмки `глава-N` — `gitops.tag_chapter`; сверка пинов с API —
-  `adapters.probe_model` (только чтение). `_after_canonize` в cli — единственная точка вызова после приёмки.
+  `adapters.probe_model` (только чтение). `_after_canonize` в `steps/tact.py` — единственная точка вызова после приёмки.
 - `ugar/verifier1.py` — проверки Э1; пороги ТОЛЬКО из norms.json (критерий 6),
   констант в коде быть не должно.
 - `ugar/verifier2.py`, `ugar/canonist.py`, `ugar/circles.py` — LLM-роли; JSON из ответов — через
@@ -67,8 +78,10 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
   континуити и хронологии 12, вопросы к решениям автора); подключён одной строкой в `run_lint`.
   `ugar/canonwatch.py` — наблюдатель mtime библиотеки; в панели запускается сервером (`serve(watch=True)`)
   и перепроверяет канон при каждом изменении; правка документов из панели — `/api/canon/doc` (сценарий Б).
-- `ugar/server.py` — локальный сервер панели (только 127.0.0.1); вызывает
-  функции cli, POST защищён заголовком `X-Ugar-Panel`; одна фоновая задача
+- `ugar/server.py` — локальный сервер панели (только 127.0.0.1); вызывает функции ядра `steps.*`
+  напрямую (`_job` = `steps.job_context`), их исключения переводит `steps.outcome` в статус задачи
+  («готово»/«ручной-режим»/«ошибка») или JSON-ошибку 400 (`_captured`); typer в сервере нет.
+  POST защищён заголовком `X-Ugar-Panel`; одна фоновая задача
   за раз и один захват вывода (redirect_stdout глобален — см. `JobRunner.exclusive()`).
   Занятость → `Busy` → HTTP 423; неизвестный `/api/*` → 404 JSON; тексты ошибок без абсолютных
   путей (`_sanitize`), 500 пишет трейсбек в `logs/panel.log`. Отмена задачи — `ugar/cancel.py`
@@ -82,9 +95,11 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
 
 ## Ловушки
 
-- Функции команд typer нельзя вызывать напрямую с дефолтами: `typer.OptionInfo`
-  истинен. Всегда передавать явные значения (`cmd_write(n, manual=False)`).
-- `typer.Exit`/`Abort` наследуют `RuntimeError` — учитывать в except.
+- В ядре (`ugar/steps`) нет typer: команды из кода (сервер, `run`, тесты) вызываются как обычные функции
+  ядра (`tact.write(n, manual=True)`), а `cli.cmd_*` — только через typer (консоль, `CliRunner`).
+  Прямой вызов `cli.cmd_*` с дефолтами оставляет `typer.OptionInfo` (истинен) — так не делать.
+  Ядро не поднимает `typer.Exit`/`confirm`: отказ — `Rejected`, ручной режим — `ManualMode`, код — `StepExit`.
+- `typer.Exit`/`Abort` наследуют `RuntimeError` — учитывать в except (в `cli.py`).
 - Тесты используют демо-библиотеку из `ugar/data/демо/` (фикстура `ws`).
 - Кириллические имена файлов и русские сообщения — намеренно (NFR-2, NFR-8).
 - Дашборд и review.html обязаны работать без сети — никаких CDN.

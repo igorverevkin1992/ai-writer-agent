@@ -129,9 +129,9 @@ def test_сброс_авто_повторов_при_write(ws, monkeypatch):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("Новый черновик главы.", encoding="utf-8")
 
-    import ugar.cli as cli_mod
+    from ugar import writer
 
-    monkeypatch.setattr(cli_mod.writer, "write_chapter", fake_write)
+    monkeypatch.setattr(writer, "write_chapter", fake_write)
     r = runner.invoke(app, ["write", "1"])
     assert r.exit_code == 0, r.output
     st2 = ChapterState(ws, 1)
