@@ -90,3 +90,11 @@ def append_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(text)
+
+
+def remove(path: Path) -> None:
+    """Единая точка удаления файлов конвейера: та же защита библиотеки, что и у записи (FR-K3).
+    Отсутствующий файл — не ошибка (устаревшие выгрузки корпуса могли исчезнуть раньше)."""
+    check_write_allowed(path)
+    with contextlib.suppress(FileNotFoundError):
+        Path(path).unlink()

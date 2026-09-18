@@ -67,6 +67,9 @@ export interface AppState {
   lint: LintSummary | null;
   /** минуты авторских пауз всех глав за сегодня (5.7, только отображение) */
   author_today_min?: number;
+  /** в библиотеке есть незакоммиченные изменения (правки из вида «Канон», исправления линтера, правки на диске) */
+  canon_uncommitted?: boolean;
+  canon_uncommitted_files?: string[];
 }
 
 export interface Check {

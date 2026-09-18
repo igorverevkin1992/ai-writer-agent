@@ -21,16 +21,18 @@ import io
 import json
 import re
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
+from typing import Callable
 
 import typer
 from pydantic import ValidationError
 
-from . import cancel, exporter, guard, review, timing, verifier2
+from . import cancel, canonchange, exporter, guard, review, timing, verifier2
 from .config import Config
 from .fsm import ChapterState
 from .paths import Workspace
@@ -87,10 +89,16 @@ class JobRunner:
     операция не ждёт, а сразу отклоняется («дождитесь завершения»).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_idle: Callable[[], None] | None = None) -> None:
         self._lock = threading.Lock()      # защита job['output']
         self._gate = threading.Lock()      # одна операция с захватом вывода
         self.job: dict | None = None
+        self.on_idle = on_idle             # после любой задачи/синхронной операции (сброс кэшей панели, 26б)
+
+    def _notify_idle(self) -> None:
+        if self.on_idle is not None:
+            with contextlib.suppress(Exception):
+                self.on_idle()
 
     @property
     def busy(self) -> bool:
@@ -121,6 +129,7 @@ class JobRunner:
             yield
         finally:
             self._gate.release()
+            self._notify_idle()
 
     def start(self, name: str, chapter: int | None, fn) -> dict:
         self._acquire()  # замок держится всё время задачи, отпускает _run
@@ -170,6 +179,7 @@ class JobRunner:
                 self.job["finished"] = datetime.now(timezone.utc).isoformat()
             cancel.clear()  # задача не дошла до точки отмены — флаг не должен пережить её
             self._gate.release()
+            self._notify_idle()
 
     def cancel(self) -> dict:
         """«Остановить» из панели: флаг отмены проверяется между вызовами моделей (ugar/cancel.py)."""
@@ -223,7 +233,13 @@ class PanelAPI:
         self.ws = ws
         self.cfg = cfg
         self.library = library
-        self.jobs = JobRunner()
+        self.jobs = JobRunner(on_idle=self.invalidate_caches)
+        # кэш состояния панели (26б): сводки глав по mtime/size их файлов, регрессия по отчёту и отпечатку
+        # шаблонов/норм, незакоммиченные файлы канона — по событиям и с коротким сроком годности
+        self._cache_lock = threading.Lock()
+        self._chapter_cache: dict[int, tuple[tuple, dict, list[tuple]]] = {}
+        self._regression_cache: tuple[tuple, bool | None] | None = None
+        self._canon_status_cache: tuple[float, list[str]] | None = None
         # линтер канона в реальном времени: наблюдатель за библиотекой → перепроверка (ugar/lint.py)
         from . import canonwatch, lint as lint_mod
 
@@ -240,36 +256,124 @@ class PanelAPI:
 
     # ------------------------------------------------------------- чтение
 
-    def state(self) -> dict:
-        from . import regression
+    # ------------------------------------------------------- кэш состояния (26б)
+
+    def invalidate_caches(self) -> None:
+        """После любой задачи/синхронной операции и после изменения канона: сводки глав, регрессия и
+        незакоммиченные файлы пересчитываются при следующем опросе (страховка к проверке по mtime)."""
+        with self._cache_lock:
+            self._chapter_cache.clear()
+            self._regression_cache = None
+            self._canon_status_cache = None
+
+    @staticmethod
+    def _stat_key(path: Path) -> tuple[int, int] | None:
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    # файлы главы, от которых зависит её сводка в обзоре
+    _CHAPTER_FILES = ("status.yaml", "verdict.json", "flags.json")
+
+    def _chapter_summary(self, n: int) -> tuple[dict, list[tuple]]:
+        """Карточка главы для обзора + авторские интервалы (локальная дата конца, секунды) для «сегодня»."""
         from .cli import NEXT_STEP, _chapter_flags_summary
 
-        chapters = []
+        st = ChapterState(self.ws, n)
+        e1, e2 = _chapter_flags_summary(self.ws, n)
+        history = st.data.get("история", [])
+        machine_s, author_s = timing.chapter_times(history)
+        author_days = []
+        for kind, secs, end in timing.intervals(history):
+            if kind == "авторское":
+                end_local = end.astimezone() if end.tzinfo else end
+                author_days.append((end_local.date(), secs))
+        return {
+            "chapter": n,
+            "state": st.state,
+            "draft": st.draft,
+            "e1": e1,
+            "e2": e2,
+            "author_min": round(author_s / 60, 1),
+            "machine_min": round(machine_s / 60, 1),
+            "next": NEXT_STEP.get(st.state, "").format(n=n),
+        }, author_days
+
+    def _chapters_cached(self) -> tuple[list[dict], float]:
+        """Сводки всех глав из кэша; глава перечитывается, только если mtime/size её файлов изменились.
+        Возвращает (карточки, авторские секунды за сегодня)."""
+        today = datetime.now().astimezone().date()
+        chapters: list[dict] = []
+        author_today = 0.0
         # Одна повреждённая глава (пустой status.yaml, битый verdict.json) — карточка «повреждено»
         # с причиной, а не 500 для всей панели (4.8).
         for d in sorted(self.ws.chapters.iterdir()) if self.ws.chapters.exists() else []:
             if not (d.is_dir() and d.name.isdigit()):
                 continue
             n = int(d.name)
-            try:
-                st = ChapterState(self.ws, n)
-                e1, e2 = _chapter_flags_summary(self.ws, n)
-                machine_s, author_s = timing.chapter_times(st.data.get("история", []))
-                chapters.append(
-                    {
-                        "chapter": n,
-                        "state": st.state,
-                        "draft": st.draft,
-                        "e1": e1,
-                        "e2": e2,
-                        "author_min": round(author_s / 60, 1),
-                        "machine_min": round(machine_s / 60, 1),
-                        "next": NEXT_STEP.get(st.state, "").format(n=n),
-                    }
-                )
-            except Exception as e:  # noqa: BLE001 — обзор не должен падать из-за одного файла
-                chapters.append({"chapter": n, "state": "повреждено", "draft": 0, "e1": "—", "e2": "—",
-                                 "author_min": 0, "machine_min": 0, "next": f"файлы главы повреждены: {e}"})
+            key = tuple(self._stat_key(d / name) for name in self._CHAPTER_FILES)
+            with self._cache_lock:
+                cached = self._chapter_cache.get(n)
+            if cached is None or cached[0] != key:
+                try:
+                    summary, author_days = self._chapter_summary(n)
+                except Exception as e:  # noqa: BLE001 — обзор не должен падать из-за одного файла
+                    summary = {"chapter": n, "state": "повреждено", "draft": 0, "e1": "—", "e2": "—",
+                               "author_min": 0, "machine_min": 0, "next": f"файлы главы повреждены: {e}"}
+                    author_days = []
+                cached = (key, summary, author_days)
+                with self._cache_lock:
+                    self._chapter_cache[n] = cached
+            chapters.append(dict(cached[1]))
+            author_today += sum(secs for day, secs in cached[2] if day == today)
+        return chapters, author_today
+
+    def _regression_green(self) -> bool | None:
+        """regression.is_green с кэшем: отчёт и отпечаток окружения (config.yaml, шаблоны, нормы)
+        пересчитываются только при изменении mtime/size этих файлов."""
+        from . import regression
+
+        parts: list = [self._stat_key(self.ws.regression / "report.json"),
+                       self._stat_key(self.ws.root / "config.yaml"),
+                       self._stat_key(self.ws.exports / "norms.json")]
+        if self.ws.templates.exists():
+            for f in sorted(p for p in self.ws.templates.rglob("*") if p.is_file()):
+                parts.append((f.relative_to(self.ws.templates).as_posix(), self._stat_key(f)))
+        key = tuple(parts)
+        with self._cache_lock:
+            cached = self._regression_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            green = regression.is_green(self.ws)
+        except Exception:  # noqa: BLE001 — битый report.json = «регрессия не запускалась»
+            green = None
+        with self._cache_lock:
+            self._regression_cache = (key, green)
+        return green
+
+    CANON_STATUS_TTL = 10.0  # секунд: коммит из терминала виден панели без события
+
+    def canon_status(self) -> list[str]:
+        """Незакоммиченные файлы библиотеки (п. 25): `git status --porcelain` не чаще раза в CANON_STATUS_TTL,
+        сброс — при любом изменении канона/задаче/событии наблюдателя."""
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._canon_status_cache
+        if cached is not None and now - cached[0] < self.CANON_STATUS_TTL:
+            return cached[1]
+        try:
+            files = canonchange.dirty_files(self.library)
+        except Exception:  # noqa: BLE001 — нет git в PATH и т. п.: «неизвестно» = пусто
+            files = []
+        with self._cache_lock:
+            self._canon_status_cache = (now, files)
+        return files
+
+    def state(self) -> dict:
+        chapters, author_today_s = self._chapters_cached()
         try:
             briefs = [
                 {"chapter": b.chapter, "volume": b.volume, "focal": b.focal, "date": b.date}
@@ -277,24 +381,23 @@ class PanelAPI:
             ]
         except Exception:  # noqa: BLE001 — нет выгрузок или устаревшая схема: «Экспорт канона» пересоберёт
             briefs = []
-        try:
-            green = regression.is_green(self.ws)
-        except Exception:  # noqa: BLE001 — битый report.json = «регрессия не запускалась»
-            green = None
+        uncommitted = self.canon_status()
         return {
             "workspace": str(self.ws.root),
             "chapters": chapters,
             "briefs": briefs,
-            "regression_green": green,
+            "regression_green": self._regression_green(),
             "models": {"writer": self.cfg.writer.model, "verifier2": self.cfg.verifier2.model},
             "job": self.jobs.summary(),
             "lint": self.lint_summary(),
-            "author_today_min": round(self._author_today_seconds() / 60, 1),
+            "author_today_min": round(author_today_s / 60, 1),
+            "canon_uncommitted": bool(uncommitted),
+            "canon_uncommitted_files": uncommitted,
         }
 
     def _author_today_seconds(self) -> float:
-        """«Сегодня: N мин автора» (5.7) — единая функция timing.today_author_minutes."""
-        return timing.today_author_minutes(self.ws) * 60
+        """«Сегодня: N мин автора» (5.7) — та же арифметика, что у timing.today_author_minutes, по кэшу глав."""
+        return self._chapters_cached()[1]
 
     def chapter(self, n: int) -> dict:
         st = ChapterState(self.ws, n)
@@ -552,6 +655,8 @@ class PanelAPI:
     # ------------------------------------------------------- канон и линтер
 
     def _on_canon_change(self, changed: list[str]) -> None:
+        with self._cache_lock:
+            self._canon_status_cache = None  # правка на диске: «незакоммичено» пересчитать при опросе
         self.request_lint(changed)
 
     def request_lint(self, changed: list[str] | None = None, wait: float = 0.0) -> None:
@@ -628,12 +733,22 @@ class PanelAPI:
         r = self.lint_report
         return {"errors": r.errors, "warnings": r.warnings, "notes": r.notes, "ts": r.ts} if r else None
 
-    def _canon_path(self, rel: str) -> Path:
+    def _canon_path(self, rel: str, *, for_write: bool = False) -> Path:
+        """Путь документа канона по относительному имени. `for_write` — запрет создавать НОВЫЕ файлы
+        в `Проза/` и в корне библиотеки (4.9): новая проза попадает в корпус только через приёмку
+        главы (FSM, `ugar canonize --apply`), новый документ канона автор кладёт файлом на диск;
+        правка существующих документов из панели — можно."""
         if not rel or not rel.endswith(".md") or ".." in rel.split("/"):
             raise ValueError("документ канона: относительный путь к .md внутри библиотеки")
-        path = (self.library / rel).resolve()
-        if self.library.resolve() not in path.parents:
+        lib = self.library.resolve()
+        path = (lib / rel).resolve()
+        if lib not in path.parents:
             raise ValueError("путь вне библиотеки")
+        if for_write and not path.exists() and path.parent in (lib, lib / "Проза"):
+            raise ValueError(
+                f"новый файл «{rel}» из панели не создаётся: проза попадает в библиотеку только через приёмку "
+                "главы (`canonize --apply`), новый документ канона — файлом на диске; здесь правятся существующие."
+            )
         return path
 
     def canon_docs(self) -> dict:
@@ -660,16 +775,29 @@ class PanelAPI:
     def save_canon_doc(self, rel: str, text: str, version: str | None) -> dict:
         """Правка канона автором из панели (сценарий Б): подтверждение дано диалогом, запись — в сессии канониста.
         `version` — хэш содержимого, которое автор открыл; расхождение = документ изменён на диске."""
-        path = self._canon_path(rel)
+        path = self._canon_path(rel, for_write=True)
         text = text if text.endswith("\n") else text + "\n"
         with self.jobs.exclusive():
             if version is not None and path.exists() and self._version(path.read_text(encoding="utf-8")) != version:
                 raise VersionConflict("документ изменён на диске после открытия — перечитайте его, чтобы не затереть чужую правку")
-            with guard.canon_write_session():
-                guard.write_text(path, text)
+            result = self._canon_change(lambda: guard.write_text(path, text), f"правка {rel} из панели", [rel])
+        return {"saved": rel, "version": self._version(text), "mtime": path.stat().st_mtime_ns, "lint": self.lint_summary(),
+                "canon_uncommitted": result.uncommitted, "canon_uncommitted_files": result.dirty_files}
+
+    def _canon_change(self, writer, message: str, changed: list[str]) -> canonchange.ChangeResult:
+        """Изменение канона из панели — единым конвейером (п. 25) БЕЗ коммита: сессия записи → выгрузки →
+        линт (сводка сразу в ответе, без очереди наблюдателя) → состояние «незакоммичено» в /api/state;
+        коммит — отдельным действием автора («Закоммитить канон» / `ugar canon-commit`).
+        Вызывать под `jobs.exclusive()`; подтверждение автор дал диалогом в панели (Д-8)."""
+        result = canonchange.canon_change(
+            self.ws, self.cfg, self.library, writer, message, commit=False, author_confirmed=True,
+        )
         self.watcher._snapshot = self.watcher._scan()  # своя запись — не «внешнее» изменение
-        self.request_lint([rel], wait=15.0)  # ответ несёт свежую сводку; при долгом линте — «pending»
-        return {"saved": rel, "version": self._version(text), "mtime": path.stat().st_mtime_ns, "lint": self.lint_summary()}
+        with self._lint_lock:
+            self.lint_report = result.lint
+            self.lint_changed = changed
+        self.invalidate_caches()
+        return result
 
     def apply_lint_fix(self, fix_data: dict) -> dict:
         """Применяет ровно то исправление, которое автор видел и подтвердил (file/line/old/new),
@@ -681,11 +809,10 @@ class PanelAPI:
             fix = LintFix(**{k: fix_data[k] for k in ("file", "line", "old", "new", "note") if fix_data.get(k) is not None})
         except (TypeError, ValidationError) as e:
             raise ValueError(f"некорректное исправление: {e}") from None
-        with self.jobs.exclusive(), guard.canon_write_session():
-            lint_mod.apply_fix(self.library, fix)
-        self.watcher._snapshot = self.watcher._scan()
-        self.request_lint([fix.file], wait=15.0)
-        return {"applied": fix.model_dump(), "lint": self.lint_summary()}
+        with self.jobs.exclusive():
+            result = self._canon_change(lambda: lint_mod.apply_fix(self.library, fix), f"исправление линтера: {fix.file}", [fix.file])
+        return {"applied": fix.model_dump(), "lint": self.lint_summary(),
+                "canon_uncommitted": result.uncommitted, "canon_uncommitted_files": result.dirty_files}
 
     def run_command(self, cmd: str, chapter: int | None, params: dict | None = None) -> dict:
         """Долгие шаги такта — фоновой задачей с захватом вывода."""

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from . import adapters, exporter, gitops, guard, llmjson, review, verifier2
+from . import adapters, canonchange, exporter, gitops, guard, llmjson, review, verifier2
 from .config import Config
 from .paths import Workspace
 from .schemas import Verdict
@@ -213,21 +213,6 @@ def _append_registry_row(path: Path, registry: str, row: str) -> bool:
     return True
 
 
-def _rollback_library(library: Path, ws: Workspace, error: BaseException) -> None:
-    """Сбой после открытия сессии записи (2.6): библиотека — к HEAD, выгрузки — пересчитать."""
-    try:
-        gitops.restore_library(library)
-    except RuntimeError as e:
-        raise RuntimeError(
-            f"применение пакета сорвалось ({error}), и откат библиотеки не удался: {e}. "
-            f"Восстановите вручную: git -C «{library}» checkout -- . && git clean -fd -- ."
-        ) from error
-    try:
-        exporter.run_export(library, ws.exports, ws.logs)
-    except Exception:  # выгрузки пересчитает `ugar export`; важнее показать исходную ошибку
-        pass
-
-
 def _chapter_prose_name(ws: Workspace, chapter: int) -> str:
     brief = exporter.load_brief(ws.exports, chapter)
     return f"Том{brief.volume}_Глава{chapter:02d}.md"
@@ -246,22 +231,9 @@ def apply_batch(ws: Workspace, cfg: Config, library: Path, chapter: int, draft: 
             "библиотека не под git — без коммита приёмки откат невозможен (FR-K2): "
             "инициализируйте репозиторий (git init в библиотеке), затем повторите."
         )
-    if gitops.in_progress(library):
-        raise RuntimeError(
-            f"в библиотеке незавершённая операция git ({gitops.in_progress(library)}) — в документах могут быть "
-            "маркеры конфликта; завершите или отмените её (`git revert --abort` / `git merge --abort`), затем повторите."
-        )
-    if gitops.dirty(library):
-        raise RuntimeError(
-            "в библиотеке незакоммиченные изменения — применение пакета требует чистого git "
-            "(защита от двойного применения). Закоммитьте их (`ugar canon-commit`) или откатите "
-            "(`git restore .`), затем повторите."
-        )
-    if not gitops.has_identity(library):
-        raise RuntimeError(
-            "git не настроен: задайте user.name/user.email в библиотеке "
-            "(git config user.email …) — иначе коммит приёмки сорвётся после записи в канон."
-        )
+    # незавершённый revert, грязная библиотека, отсутствие авторства git — отказ ДО чтения пакета
+    # (canon_change повторит те же проверки перед записью)
+    canonchange.check_git(library, commit=True, action="применение пакета")
     batch_path = ws.chapter_dir(chapter) / "canon_batch.md"
     proposals = json.loads((ws.chapter_dir(chapter) / "canon_batch.json").read_text(encoding="utf-8"))
     accepted_rows: list[tuple[str, str]] = []
@@ -297,43 +269,43 @@ def apply_batch(ws: Workspace, cfg: Config, library: Path, chapter: int, draft: 
         f"[глава {chapter}] приёмка: записей в реестры {n_facts}, правок {n_edits}, "
         f"канонизировано самоволок {n_sam} (конвейер, Р-016)"
     )
-    try:
-        with guard.canon_write_session():
-            # 1) текст главы в Проза/
-            guard.write_text(library / "Проза" / _chapter_prose_name(ws, chapter), text)
-            # 2) строки реестров — только в таблицу с подходящими заголовками (2.7)
-            inbox: list[str] = []
-            for registry, row in accepted_rows:
-                glob = REGISTRY_GLOBS.get(registry)
-                target = sorted(library.glob(glob)) if glob else []
-                if not (target and row.strip().startswith("|") and _append_registry_row(target[0], registry, row.strip())):
-                    inbox.append(f"- РЕЕСТР {registry}: {row}")
-            # 3) статус закладок главы: положена (FR-K1); нет места для отметки — заметка во «Входящие»
-            inbox += _update_plants_status(ws, library, chapter)
-            if inbox:
-                guard.append_text(
-                    library / INBOX_DOC,
-                    f"\n## Глава {chapter}\n" + "\n".join(inbox) + "\n",
-                )
-            # 4) кандидаты в правила вкуса → в конец 02 (разложит автор)
-            if accepted_rules:
-                p02 = sorted(library.glob("02_*.md"))[0]
-                guard.append_text(
-                    p02,
-                    f"\n### Кандидаты конвейера (глава {chapter}) — разложить по §6.1/§6.2\n"
-                    + "\n".join(f"- {t}: {r}" for t, r in accepted_rules)
-                    + "\n",
-                )
-        # 5) перегенерация выгрузок и корпуса (текст главы попадает в corpus/)
-        exporter.run_export(library, ws.exports, ws.logs)
-        # 6) атомарный git-коммит (5.1) с шаблонным сообщением (FR-K2)
-        commit = gitops.commit_all(library, message, author=cfg.commit_author)
-        if commit is None:
-            raise RuntimeError("после записи пакета в библиотеке нет изменений — коммит приёмки не создан (проверьте пакет).")
-    except BaseException as e:
-        # 2.6: библиотека не остаётся грязной — откат к HEAD, повтор применения возможен
-        _rollback_library(library, ws, e)
-        raise
+
+    def write_batch() -> None:
+        # 1) текст главы в Проза/
+        guard.write_text(library / "Проза" / _chapter_prose_name(ws, chapter), text)
+        # 2) строки реестров — только в таблицу с подходящими заголовками (2.7)
+        inbox: list[str] = []
+        for registry, row in accepted_rows:
+            glob = REGISTRY_GLOBS.get(registry)
+            target = sorted(library.glob(glob)) if glob else []
+            if not (target and row.strip().startswith("|") and _append_registry_row(target[0], registry, row.strip())):
+                inbox.append(f"- РЕЕСТР {registry}: {row}")
+        # 3) статус закладок главы: положена (FR-K1); нет места для отметки — заметка во «Входящие»
+        inbox += _update_plants_status(ws, library, chapter)
+        if inbox:
+            guard.append_text(
+                library / INBOX_DOC,
+                f"\n## Глава {chapter}\n" + "\n".join(inbox) + "\n",
+            )
+        # 4) кандидаты в правила вкуса → в конец 02 (разложит автор)
+        if accepted_rules:
+            p02 = sorted(library.glob("02_*.md"))[0]
+            guard.append_text(
+                p02,
+                f"\n### Кандидаты конвейера (глава {chapter}) — разложить по §6.1/§6.2\n"
+                + "\n".join(f"- {t}: {r}" for t, r in accepted_rules)
+                + "\n",
+            )
+
+    # 5–6) единый конвейер изменения канона: сессия записи → выгрузки и корпус (текст главы попадает
+    # в corpus/) → линт → атомарный git-коммит (5.1, FR-K2). Сбой после открытия сессии откатывает
+    # библиотеку к HEAD (2.6) — библиотека не остаётся грязной, повтор применения возможен.
+    result = canonchange.canon_change(
+        ws, cfg, library, write_batch, message, commit=True, author_confirmed=True, action="применение пакета",
+    )
+    commit = result.commit
+    if commit is None:
+        raise RuntimeError("после записи пакета в библиотеке нет изменений — коммит приёмки не создан (проверьте пакет).")
     # 7) запись метрик главы — только после состоявшегося коммита
     _write_metrics(ws, chapter)
     return commit
