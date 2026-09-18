@@ -272,11 +272,12 @@ def run(ws: Workspace, cfg: Config, scope: str, chapter: int | None = None, only
     prompts: list[str] = []
     system = _template(ws)
     manual_reason = None
-    for sc, key in targets(ws, scope, chapter):
+    todo = [(sc, key) for sc, key in targets(ws, scope, chapter)
+            if not (only_missing and (_dir(ws) / f"{_file_stem(sc, key)}.json").exists())]
+    for i, (sc, key) in enumerate(todo, start=1):
         stem = _file_stem(sc, key)
-        if only_missing and (_dir(ws) / f"{stem}.json").exists():
-            continue
         title, material = build_material(ws, sc, key)
+        print(f"[{i}/{len(todo)}] {title}")  # прогресс для карточки задачи в панели (аудит 5.5)
         user = f"# {title}\n\n{material}"
         prompt_path = _dir(ws) / "промпты" / f"{stem}.md"
         guard.write_text(prompt_path, f"<!-- system -->\n{system}\n\n<!-- user -->\n{user}\n")

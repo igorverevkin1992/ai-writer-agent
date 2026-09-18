@@ -293,28 +293,8 @@ class PanelAPI:
         }
 
     def _author_today_seconds(self) -> float:
-        """«Сегодня: N мин автора» (5.7): авторские интервалы истории всех глав за сегодняшнюю
-        (местную) дату — через timing.chapter_times по отфильтрованной истории."""
-        today = datetime.now().date()
-        total = 0.0
-        if not self.ws.chapters.exists():
-            return 0.0
-        for d in self.ws.chapters.iterdir():
-            if not (d.is_dir() and d.name.isdigit()):
-                continue
-            try:
-                history = ChapterState(self.ws, int(d.name)).data.get("история", [])
-            except Exception:  # noqa: BLE001 — повреждённая глава уже показана в очереди
-                continue
-            todays = []
-            for h in history:
-                try:
-                    if datetime.fromisoformat(h["время"]).astimezone().date() == today:
-                        todays.append(h)
-                except (KeyError, ValueError, TypeError):
-                    continue
-            total += timing.chapter_times(todays)[1]
-        return total
+        """«Сегодня: N мин автора» (5.7) — единая функция timing.today_author_minutes."""
+        return timing.today_author_minutes(self.ws) * 60
 
     def chapter(self, n: int) -> dict:
         st = ChapterState(self.ws, n)

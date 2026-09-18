@@ -56,10 +56,24 @@ def _job_start(rec: dict) -> datetime | None:
         return None
 
 
-def intervals(history: list[dict]) -> list[tuple[str, float, datetime]]:
-    """Завершённые интервалы истории: (вид «машинное»|«авторское», секунды, момент конца).
+# Авторская пауза длиннее этого — перерыв (ушёл, ночь, другой день), а не работа над главой:
+# критерий «≤ 40 мин автора на такт» измеряет работу, а не время между сеансами.
+MAX_AUTHOR_PAUSE_S = 2 * 3600
 
-    Текущее незакрытое состояние не учитывается — пауза ещё идёт."""
+
+def _is_break(t0: datetime, t1: datetime) -> bool:
+    if (t1 - t0).total_seconds() > MAX_AUTHOR_PAUSE_S:
+        return True
+    a = t0.astimezone() if t0.tzinfo else t0
+    b = t1.astimezone() if t1.tzinfo else t1
+    return a.date() != b.date()
+
+
+def intervals(history: list[dict]) -> list[tuple[str, float, datetime]]:
+    """Завершённые интервалы истории: (вид «машинное»|«авторское»|«перерыв», секунды, момент конца).
+
+    Текущее незакрытое состояние не учитывается — пауза ещё идёт. Авторская пауза дольше
+    MAX_AUTHOR_PAUSE_S или через границу дня — «перерыв», в время такта не входит."""
     out: list[tuple[str, float, datetime]] = []
     for cur, nxt in zip(history, history[1:], strict=False):  # пары соседей
         try:
@@ -75,10 +89,10 @@ def intervals(history: list[dict]) -> list[tuple[str, float, datetime]]:
             continue
         start = _job_start(nxt)
         if start is not None and t0 <= start <= t1:
-            out.append(("авторское", (start - t0).total_seconds(), start))
+            out.append(("перерыв" if _is_break(t0, start) else "авторское", (start - t0).total_seconds(), start))
             out.append(("машинное", (t1 - start).total_seconds(), t1))
         else:
-            out.append(("авторское", delta, t1))
+            out.append(("перерыв" if _is_break(t0, t1) else "авторское", delta, t1))
     return out
 
 
@@ -89,7 +103,7 @@ def chapter_times(history: list[dict]) -> tuple[float, float]:
     for kind, secs, _ in intervals(history):
         if kind == "авторское":
             author += secs
-        else:
+        elif kind == "машинное":
             machine += secs
     return machine, author
 
