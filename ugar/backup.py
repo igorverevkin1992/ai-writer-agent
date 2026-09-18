@@ -148,9 +148,9 @@ def make_archive(ws: Workspace, cfg: Config, dest: Path | None = None, *, keep: 
                 elif src.is_dir():
                     for f in _iter_files(src):
                         zf.write(f, f.relative_to(ws.root).as_posix())
-        os.replace(tmp, final)
+        guard.replace(tmp, final)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        guard.remove(tmp)
         raise
     return final, rotate(dest, keep)
 
@@ -162,7 +162,7 @@ def rotate(dest: Path, keep: int) -> list[Path]:
     items = list_archives(dest)
     removed = items[:-keep] if len(items) > keep else []
     for p in removed:
-        p.unlink()
+        guard.remove(p)
     return removed
 
 
