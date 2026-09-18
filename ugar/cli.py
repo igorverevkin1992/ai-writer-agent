@@ -11,6 +11,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ import typer
 
 from . import (
     adapters,
+    backup as backup_mod,
     cancel,
     canonist,
     compiler,
@@ -45,6 +47,31 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
+
+
+def version_string() -> str:
+    """Версия конвейера: из метаданных установленного пакета, иначе из ugar/__init__.py."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("ugar-pipeline")
+    except PackageNotFoundError:
+        from . import __version__
+
+        return __version__
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"ugar {version_string()}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(False, "--version", "-V", help="Версия конвейера.", callback=_version_callback, is_eager=True),
+) -> None:
+    """КОНВЕЙЕР УГАР — производственный такт главы (ТЗ v1.0)."""
 
 
 def _ctx() -> tuple[Workspace, Config, Path]:
@@ -588,6 +615,7 @@ def cmd_canonize(
     if existing:
         st.data["коммит_приёмки"] = existing
         st.transition("зафиксировано", "canonize --apply (восстановление по коммиту)")
+        _after_canonize(ws, cfg, lib, chapter, existing)
         typer.secho(
             f"Пакет главы {chapter} уже применён коммитом {existing[:10]} — повторное применение "
             f"продублировало бы записи. Состояние восстановлено: «зафиксировано».",
@@ -602,6 +630,24 @@ def cmd_canonize(
     st.data["коммит_приёмки"] = commit  # откат зафиксированной главы — строго по этому SHA
     st.transition("зафиксировано", "canonize --apply")
     typer.secho(f"Глава {chapter} зафиксирована. Коммит: {commit}", fg=typer.colors.GREEN)
+    _after_canonize(ws, cfg, lib, chapter, commit)
+
+
+def _after_canonize(ws: Workspace, cfg: Config, lib: Path, chapter: int, commit: str) -> None:
+    """После приёмки (аудит 2, п. 28–29): тег версии канона `глава-N` (повторная приёмка после отката —
+    `глава-N-2`) и архив рабочей области, если в config.yaml задан backup_dir. Ни то, ни другое не может
+    сорвать приёмку: она уже закоммичена и состояние сменено; сбой — предупреждение."""
+    name = gitops.tag_chapter(lib, chapter, commit)
+    if name:
+        typer.echo(f"Тег канона: {name}")
+    else:
+        typer.secho("⚠ Тег главы не поставлен (git tag не удался) — приёмка при этом закоммичена.", fg=typer.colors.YELLOW)
+    if cfg.backup_dir:
+        try:
+            path, removed = backup_mod.make_archive(ws, cfg)
+            typer.echo(f"Архив рабочей области: {path}" + (f" (удалено старых: {len(removed)})" if removed else ""))
+        except OSError as e:
+            typer.secho(f"⚠ Архив рабочей области не создан: {e}", fg=typer.colors.YELLOW)
 
 
 # ------------------------------------------------------------- сервисные
@@ -1078,7 +1124,10 @@ def cmd_doctor() -> None:
     item((ws.root / "config.yaml").exists(), "config.yaml", "создайте: `ugar init`")
     item(lib.exists(), f"библиотека канона: {lib}", "положите УГАР_Библиотека/ или поправьте library_dir в config.yaml")
     if lib.exists():
-        item(gitops.is_repo(lib), "библиотека под git", "git init внутри библиотеки (версионирование канона, §5.1)")
+        lay = backup_mod.layout(lib, ws.root)
+        item(lay.kind != "no-git", "библиотека под git", "git init внутри библиотеки (версионирование канона, §5.1)")
+        if lay.kind != "no-git":
+            item(lay.ok, lay.label, lay.hint)  # три раскладки (п. 28): своя / внутри репозитория кода / не под git
         if gitops.is_repo(lib):
             item(gitops.has_identity(lib) or bool(cfg.commit_author), "авторство git настроено",
                  "git config user.email/user.name или commit_author в config.yaml (Д-8)")
@@ -1086,7 +1135,15 @@ def cmd_doctor() -> None:
                  f"завершите или отмените: git {gitops.in_progress(lib) or ''} --abort (в документах могут быть маркеры конфликта)")
             n_remotes = len(gitops.remotes(lib))
             item(n_remotes >= cfg.backup_remotes_min, f"удалённых копий: {n_remotes} (нужно ≥{cfg.backup_remotes_min})",
-                 "добавьте git remote (NFR-6)")
+                 "`ugar backup --добавить-remote <имя> <url|папка>` — папка на внешнем диске подходит (NFR-6, §1.3)")
+    arch_dir = backup_mod.archive_dir(ws, cfg)
+    arch_age = backup_mod.archive_age_days(arch_dir)
+    if arch_age is None:
+        item(None if cfg.backup_dir is None else False, f"архив рабочей области: ещё не делался ({arch_dir})",
+             "`ugar backup --архив`; backup_dir в config.yaml — архив после каждой приёмки главы (п. 29)")
+    else:
+        item(arch_age <= 7, f"архив рабочей области: {arch_age:.1f} дн. назад ({backup_mod.latest_archive(arch_dir)})",
+             "`ugar backup --архив`")
     manifest = ws.exports / "manifest.json"
     item(manifest.exists(), "выгрузки exports/", "выполните `ugar export`")
     item(bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")),
@@ -1101,6 +1158,17 @@ def cmd_doctor() -> None:
 
     item(has_module("google.genai"), "SDK google-genai", "pip install 'ugar-pipeline[llm]'")
     item(has_module("anthropic"), "SDK anthropic", "pip install 'ugar-pipeline[llm]'")
+    # пины моделей против API (п. 31): только чтение метаданных, ни одной генерации
+    seen: set[tuple[str, str]] = set()
+    for role, mc in (("Писатель", cfg.writer), ("Верификатор-2", cfg.verifier2), ("Канонист", cfg.canonist)):
+        if (mc.provider, mc.model) in seen:
+            continue
+        seen.add((mc.provider, mc.model))
+        ok, note = adapters.probe_model(mc)
+        roles = "/".join(r for r, m in (("Писатель", cfg.writer), ("Верификатор-2", cfg.verifier2), ("Канонист", cfg.canonist))
+                         if (m.provider, m.model) == (mc.provider, mc.model))
+        label = f"модель {mc.model} ({roles}): " + (f"есть в API ({note})" if ok else note)
+        item(ok, label, "смените пин в config.yaml через пере-тест (`ugar retest`, сценарий В, Д-11)" if ok is False else "")
     green = regression_mod.is_green(ws)
     if green is None:
         label = (
@@ -1412,25 +1480,100 @@ def cmd_canon_commit(
     typer.secho(f"Канон закоммичен: {commit}", fg=typer.colors.GREEN)
 
 
+@app.command("library-split", rich_help_panel="Канон и бэкап")
+@_friendly
+def cmd_library_split(
+    target: str | None = typer.Option(None, "--в", "--to", help="Куда перенести (по умолчанию ../УГАР_Библиотека рядом с рабочей областью)."),
+    show: bool = typer.Option(False, "--показать", "--dry-run", help="Только план, ничего не менять."),
+    with_history: bool = typer.Option(False, "--с-историей", "--with-history",
+                                      help="Перенести историю папки в новый репозиторий (git subtree split)."),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+) -> None:
+    """Вынести библиотеку канона в отдельный git-репозиторий рядом с рабочей областью (аудит 2, п. 28):
+    перенос папки, git init + первый коммит, library_dir в config.yaml, .gitignore в прежнем репозитории."""
+    ws, cfg, lib = _ctx()
+    target, show, with_history = _opt(target, None), _opt(show, False), _opt(with_history, False)
+    try:
+        plan = backup_mod.plan_split(ws, cfg, lib, Path(target) if target else None, with_history=with_history)
+    except backup_mod.SplitError as e:
+        _fail(str(e))
+    typer.secho(f"Сейчас: {plan.layout.label}.", bold=True)
+    typer.echo("План переезда:")
+    for line in plan.lines():
+        typer.echo(f"  {line}")
+    if show:
+        typer.echo("Ничего не изменено (--показать). Выполнить: `ugar library-split`" + (" --с-историей" if with_history else "") + ".")
+        return
+    if not yes and not typer.confirm("Выполнить переезд? (y)"):
+        raise typer.Exit()
+    for note in backup_mod.split_library(ws, cfg, plan):
+        typer.secho(f" ✓ {note}", fg=typer.colors.GREEN)
+    typer.echo("Что дальше:")
+    for line in backup_mod.after_split_advice(plan):
+        typer.echo(f"  • {line}")
+
+
+def _is_git_url(value: str) -> bool:
+    """URL удалённого репозитория (https://, ssh://, git@host:path) — в отличие от локальной папки."""
+    return "://" in value or bool(re.match(r"^[\w.-]+@[\w.-]+:", value))
+
+
 @app.command("backup", rich_help_panel="Канон и бэкап")
 @_friendly
 def cmd_backup(
+    folder: str | None = typer.Argument(None, help="Папка архива для --архив (по умолчанию backup_dir из config.yaml, иначе ../УГАР_бэкап)."),
     push: bool = typer.Option(False, "--push", help="Отправить библиотеку во все удалённые места (после y)."),
+    archive: bool = typer.Option(False, "--архив", "--archive", help="Zip рабочей области (chapters/, logs/, круги, снапшоты, корпус, config.yaml)."),
+    add_remote: tuple[str, str] | None = typer.Option(
+        None, "--добавить-remote", "--add-remote", metavar="ИМЯ URL|ПАПКА",
+        help="Добавить удалённое место библиотеки: URL или локальная папка (внешний диск; создаётся как bare-репозиторий)."
+    ),
     yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Проверка свежести бэкапа (NFR-6); --push — отправить во все remotes."""
+    """Сохранность (NFR-6): состояние копий; --push — во все remotes; --архив — zip рабочей области;
+    --добавить-remote — второе место хранения (папка на внешнем диске = без облака, §1.3 ТЗ)."""
     ws, cfg, lib = _ctx()
+    folder = _opt(folder, None)
+    archive, add_remote = _opt(archive, False), _opt(add_remote, None)
     if not gitops.is_repo(lib):
-        _fail("библиотека не под git — инициализируйте репозиторий.")
+        _fail("библиотека не под git — инициализируйте репозиторий (`ugar library-split` — как отдельный).")
+    if add_remote:
+        name, url = add_remote
+        if name in gitops.remotes(lib):
+            _fail(f"удалённое место «{name}» уже есть: {gitops.remote_url(lib, name)}")
+        if not _is_git_url(url):
+            target = Path(url).expanduser()
+            target = target if target.is_absolute() else (Path.cwd() / target)
+            if target.exists() and not gitops.is_bare_repo(target):
+                _fail(f"папка {target} существует, но это не bare-репозиторий git — укажите пустой путь.")
+            if not target.exists():
+                gitops.init_bare(target)
+                typer.echo(f"Создан bare-репозиторий: {target}")
+            url = str(target)
+        gitops.add_remote(lib, name, url)
+        typer.secho(f"Удалённое место «{name}» добавлено: {url}. Отправка — `ugar backup --push`.", fg=typer.colors.GREEN)
     remotes = gitops.remotes(lib)
     typer.echo(f"Удалённых мест: {len(remotes)} ({', '.join(remotes) or 'нет'}); требуется ≥{cfg.backup_remotes_min}.")
     if len(remotes) < cfg.backup_remotes_min:
-        typer.secho("⚠ Добавьте удалённые репозитории/внешние копии (NFR-6).", fg=typer.colors.YELLOW)
+        typer.secho("⚠ Добавьте удалённые репозитории/внешние копии (NFR-6): `ugar backup --добавить-remote <имя> <url|папка>`.",
+                    fg=typer.colors.YELLOW)
     if gitops.dirty(lib):
         typer.secho("⚠ В библиотеке незакоммиченные изменения (`ugar canon-commit`).", fg=typer.colors.YELLOW)
     age = gitops.last_commit_age_days(lib)
     if age is not None:
         typer.echo(f"Последний коммит: {age:.1f} дн. назад.")
+    arch_dir = backup_mod.archive_dir(ws, cfg, folder)
+    if archive:
+        path, removed = backup_mod.make_archive(ws, cfg, arch_dir)
+        typer.secho(f"Архив рабочей области: {path}", fg=typer.colors.GREEN)
+        if removed:
+            typer.echo(f"Удалено старых архивов: {len(removed)} (хранится последних {cfg.backup_keep}, backup_keep).")
+    else:
+        arch_age = backup_mod.archive_age_days(arch_dir)
+        typer.echo(
+            f"Архив рабочей области: {arch_age:.1f} дн. назад ({backup_mod.latest_archive(arch_dir)})." if arch_age is not None
+            else f"Архив рабочей области ещё не делался ({arch_dir}): `ugar backup --архив`."
+        )
     if push:
         if not remotes:
             _fail("нет удалённых репозиториев — добавьте git remote.")

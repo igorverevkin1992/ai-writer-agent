@@ -163,3 +163,57 @@ def call_anthropic(
         return text, resp.usage.input_tokens, resp.usage.output_tokens
 
     return _retry_call(do, api, logs_dir, role=role, mc=mc, chapter=chapter)
+
+
+# ------------------------------------------------------ сверка пинов с API (аудит 2, этап 5, п. 31)
+
+PROBE_TIMEOUT_S = 10
+
+
+def probe_model(mc: ModelConfig, timeout_s: float = PROBE_TIMEOUT_S) -> tuple[bool | None, str]:
+    """Существует ли модель `mc.model` у провайдера — ТОЛЬКО чтение метаданных (models.get/retrieve),
+    ни одной генерации. (True, «имя») — есть; (False, причина) — не найдена/снята; (None, причина) —
+    не проверено (нет ключа/SDK/сети). Ошибки никогда не поднимаются: это диагностика `doctor`."""
+    if mc.provider == "gemini":
+        key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not key:
+            return None, "нет GEMINI_API_KEY"
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError:
+            return None, "SDK google-genai не установлен"
+        try:
+            client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=int(timeout_s * 1000)))
+            info = client.models.get(model=mc.model)
+            return True, getattr(info, "display_name", None) or getattr(info, "name", None) or mc.model
+        except Exception as e:  # noqa: BLE001 — диагностика: любая ошибка → вердикт словами
+            if _http_status(e) == 404:
+                return False, f"модель «{mc.model}» не найдена в API (снята или неверный ID)"
+            return None, f"не проверено: {type(e).__name__}: {str(e)[:120]}"
+    if mc.provider == "anthropic":
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not key:
+            return None, "нет ANTHROPIC_API_KEY"
+        try:
+            import anthropic
+        except ImportError:
+            return None, "SDK anthropic не установлен"
+        try:
+            client = anthropic.Anthropic(api_key=key, timeout=float(timeout_s), max_retries=0)
+            info = client.models.retrieve(mc.model)
+            return True, getattr(info, "display_name", None) or getattr(info, "id", None) or mc.model
+        except Exception as e:  # noqa: BLE001
+            if _http_status(e) == 404:
+                return False, f"модель «{mc.model}» не найдена в API (снята или неверный ID)"
+            return None, f"не проверено: {type(e).__name__}: {str(e)[:120]}"
+    return None, f"неизвестный провайдер «{mc.provider}»"
+
+
+def _http_status(e: Exception) -> int | None:
+    for attr in ("status_code", "code"):
+        v = getattr(e, attr, None)
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+    v = getattr(getattr(e, "response", None), "status_code", None)
+    return v if isinstance(v, int) else None

@@ -1,10 +1,25 @@
 library_dir: "УГАР_Библиотека"
+# Где хранить библиотеку — решение автора (аудит 2, Р-№ 6): `ugar doctor` показывает раскладку,
+# `ugar library-split` выносит её в соседний репозиторий (../УГАР_Библиотека) и правит library_dir сам.
+
+# Архив рабочей области (chapters/, logs/, круги_истории/, snapshots/, regression/, config.yaml) —
+# zip после каждой приёмки главы (`canonize --apply`) и по `ugar backup --архив`; хранится backup_keep последних.
+# backup_dir: "../УГАР_бэкап"
+# backup_keep: 10
 
 # Цены за 1 млн токенов — для оценки стоимости в logs/api.jsonl и «Журнале API» панели (§6.3).
 # Модели — пины автора (Р-016, Д-11); цены по прайс-листам на 03.09.2026, обновляйте при смене тарифов.
 writer:
   provider: gemini
   model: gemini-3.1-pro
+  params:
+    # Уровень размышлений Писателя (Д-6: параметр пинуется явно, смета ЭКОНОМИКА.md §6 — по нему).
+    # Форма — как принимает google-genai (проверено на SDK 2.24.0: types.GenerateContentConfig.thinking_config
+    # → types.ThinkingConfig(thinking_level=MINIMAL|LOW|MEDIUM|HIGH)); адаптер передаёт params как есть.
+    # HIGH — значение провайдера по умолчанию для Gemini 3 Pro, то есть то, при котором прошёл отбор;
+    # понижение (LOW — дешевле и быстрее) — решение автора через пере-тест (`ugar retest`, Р-№ 8).
+    thinking_config:
+      thinking_level: HIGH
   price_in_per_1m: 2.0
   price_out_per_1m: 12.0
 verifier2:

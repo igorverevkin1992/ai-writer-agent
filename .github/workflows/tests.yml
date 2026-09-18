@@ -11,7 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # macOS — потому что `Запустить_панель.command` и кириллические пути должны работать и там (аудит 2, п. 31)
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +22,7 @@ jobs:
       - name: Git с кириллическими путями
         run: git config --global core.quotepath off
       - name: Установка
-        run: pip install -e ".[dev]" ruff
+        run: pip install -e ".[dev]"
       - name: Линт кода (ruff)
         run: ruff check ugar tests
       - name: Тесты
@@ -39,6 +40,23 @@ jobs:
           python-version: "3.12"
       - name: Установка с SDK
         run: pip install -e ".[llm,dev]"
+      - name: Линт кода (ruff)
+        run: ruff check ugar tests
+      - name: Тесты
+        run: python -m pytest tests/ -q
+
+  pytest-lock:
+    # ровно те версии, что в requirements.lock (проверенная установка автора)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Установка по lock-файлу
+        run: |
+          pip install -r requirements.lock
+          pip install -e . --no-deps
       - name: Тесты
         run: python -m pytest tests/ -q
 

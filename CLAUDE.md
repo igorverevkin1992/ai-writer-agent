@@ -27,6 +27,11 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
   `ugar/realcanon.py`; что читает машина — `УГАР_Библиотека/ИНСТРУМЕНТ_Соглашения_разметки.md` (Д-1).
 - `УГАР_Библиотека/` — настоящая библиотека канона автора (30 документов); репозиторий
   = рабочая область (`config.yaml` в корне). Тесты на неё — `tests/test_real_canon.py`.
+- `ugar/backup.py` — сохранность (аудит 2, п. 28–29): раскладка библиотеки относительно git (`layout`,
+  три случая в `doctor`), zip-архив рабочей области с ротацией (`make_archive`; после `canonize --apply`
+  при `backup_dir`), переезд библиотеки в отдельный репозиторий (`plan_split`/`split_library`,
+  команда `library-split`). Теги приёмки `глава-N` — `gitops.tag_chapter`; сверка пинов с API —
+  `adapters.probe_model` (только чтение). `_after_canonize` в cli — единственная точка вызова после приёмки.
 - `ugar/verifier1.py` — проверки Э1; пороги ТОЛЬКО из norms.json (критерий 6),
   констант в коде быть не должно.
 - `ugar/verifier2.py`, `ugar/canonist.py`, `ugar/circles.py` — LLM-роли; JSON из ответов — через

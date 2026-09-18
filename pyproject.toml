@@ -15,8 +15,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-llm = ["google-genai>=1.0", "anthropic>=0.40"]
-dev = ["pytest>=7.4"]
+# Верхние границы — по мажорным версиям (аудит 2, п. 31): смена мажора SDK меняет HTTP-стек и типы;
+# точные версии проверенной установки — requirements.lock, порядок обновления — ЗАПУСК.md, шаг 7.
+llm = ["google-genai>=1.0,<3", "anthropic>=0.40,<2"]
+dev = ["pytest>=7.4", "ruff>=0.5"]
 
 [project.scripts]
 ugar = "ugar.cli:app"

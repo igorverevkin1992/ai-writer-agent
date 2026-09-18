@@ -46,6 +46,8 @@ class Config(BaseModel):
     edit_cycle_max_iterations: int = 3     # FR-E3: ≤3 итераций
     commit_author: str | None = None       # Д-8: авторство коммита — автор ("Имя <email>")
     backup_remotes_min: int = 2            # NFR-6
+    backup_dir: str | None = None          # архив рабочей области (chapters/, logs/…); None = ../УГАР_бэкап по запросу
+    backup_keep: int = 10                  # сколько последних архивов хранить
 
     @field_validator("commit_author")
     @classmethod
