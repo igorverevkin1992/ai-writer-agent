@@ -21,9 +21,13 @@ export interface Brief {
 export interface Job {
   name: string;
   chapter: number | null;
-  status: "выполняется" | "готово" | "ошибка" | "ручной-режим";
+  status: "выполняется" | "готово" | "ошибка" | "ручной-режим" | "остановлено";
   started: string;
   finished?: string;
+  /** «N из M» — из последней строки вида [N/M] в логе задачи (5.5); null — счётчика нет */
+  progress?: [number, number] | null;
+  /** автор нажал «Остановить» — флаг отмены поставлен, задача завершится между вызовами */
+  cancel_requested?: boolean;
   output_tail: string; // хвост лога (в /api/state — без полного вывода, 5.5)
   output_len: number;
   output?: string; // полный лог — только /api/job
@@ -61,6 +65,8 @@ export interface AppState {
   models: { writer: string; verifier2: string };
   job: Job | null;
   lint: LintSummary | null;
+  /** минуты авторских пауз всех глав за сегодня (5.7, только отображение) */
+  author_today_min?: number;
 }
 
 export interface Check {
