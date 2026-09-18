@@ -187,8 +187,8 @@ def test_двойная_отправка_manual_draft_даёт_один_черн
     t2.join(10)
 
     codes = sorted(c for c, _ in results)
-    assert codes == [200, 400], results
-    rejected = next(d for c, d in results if c == 400)
+    assert codes == [200, 423], results
+    rejected = next(d for c, d in results if c == 423)
     assert "дождитесь" in rejected["error"]
     assert ws.draft_path(1, 1).exists() and not ws.draft_path(1, 2).exists()
     assert ChapterState(ws, 1).state == "сгенерировано"

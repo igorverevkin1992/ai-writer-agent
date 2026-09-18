@@ -21,6 +21,7 @@ import io
 import json
 import re
 import threading
+import traceback
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -29,7 +30,7 @@ from pathlib import Path
 import typer
 from pydantic import ValidationError
 
-from . import exporter, guard, review, timing, verifier2
+from . import cancel, exporter, guard, review, timing, verifier2
 from .config import Config
 from .fsm import ChapterState
 from .paths import Workspace
@@ -50,6 +51,12 @@ PROMPT_KINDS = ("verify2", "edits")
 MAX_BODY = 50 * 1024 * 1024
 # хвост лога задачи, который уезжает в /api/state при каждом опросе (5.5)
 OUTPUT_TAIL = 2048
+# прогресс задачи: последняя строка вида «[N/M]» в выводе (круги — 51 вызов, 5.5)
+_PROGRESS_RE = re.compile(r"\[(\d+)/(\d+)\]")
+
+
+class Busy(RuntimeError):
+    """Сервер занят задачей или синхронной операцией → HTTP 423 (аудит 5.4)."""
 
 
 class _LiveBuffer(io.TextIOBase):
@@ -62,6 +69,12 @@ class _LiveBuffer(io.TextIOBase):
     def write(self, s: str) -> int:
         with self.lock:
             self.job["output"] += _strip_ansi(s)
+            # счётчик «N из M» ищем в хвосте — строка могла прийти двумя кусками
+            m = None
+            for m in _PROGRESS_RE.finditer(self.job["output"][-512:]):
+                pass
+            if m:
+                self.job["progress"] = [int(m.group(1)), int(m.group(2))]
         return len(s)
 
 
@@ -89,16 +102,16 @@ class JobRunner:
         return "дождитесь завершения текущей операции"
 
     def _acquire(self) -> None:
-        """Неблокирующий захват: занято → RuntimeError, а не ожидание."""
+        """Неблокирующий захват: занято → Busy (HTTP 423), а не ожидание."""
         if not self._gate.acquire(blocking=False):
-            raise RuntimeError(self._busy_message())
+            raise Busy(self._busy_message())
         if self.busy:  # страховка: задача идёт, а замок по какой-то причине свободен
             self._gate.release()
-            raise RuntimeError(self._busy_message())
+            raise Busy(self._busy_message())
 
     def ensure_idle(self) -> None:
         if self.busy:
-            raise RuntimeError(self._busy_message())
+            raise Busy(self._busy_message())
 
     @contextlib.contextmanager
     def exclusive(self):
@@ -119,7 +132,10 @@ class JobRunner:
                     "status": "выполняется",
                     "output": "",
                     "started": datetime.now(timezone.utc).isoformat(),
+                    "progress": None,
+                    "cancel_requested": False,
                 }
+            cancel.clear()  # флаг прошлой (уже завершившейся) задачи не должен остановить новую
             threading.Thread(target=self._run, args=(fn,), daemon=True).start()
         except BaseException:
             self._gate.release()
@@ -133,6 +149,9 @@ class JobRunner:
         try:
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 fn()
+        except cancel.Cancelled as e:
+            buf.write(f"\n{e}")
+            status = "остановлено"
         except typer.Exit as e:
             code = getattr(e, "exit_code", 1)
             status = "готово" if code == 0 else ("ручной-режим" if code == 2 else "ошибка")
@@ -143,9 +162,23 @@ class JobRunner:
             status = "ошибка"
         finally:
             with self._lock:
+                # автор нажал «Остановить», и задача завершилась не успехом (в т.ч. через
+                # _friendly команды, где Cancelled превращается в Exit(1)) — это остановка, не ошибка
+                if status == "ошибка" and self.job.get("cancel_requested"):
+                    status = "остановлено"
                 self.job["status"] = status
                 self.job["finished"] = datetime.now(timezone.utc).isoformat()
+            cancel.clear()  # задача не дошла до точки отмены — флаг не должен пережить её
             self._gate.release()
+
+    def cancel(self) -> dict:
+        """«Остановить» из панели: флаг отмены проверяется между вызовами моделей (ugar/cancel.py)."""
+        with self._lock:
+            if not (self.job and self.job["status"] == "выполняется"):
+                raise ValueError("нет выполняющейся задачи — останавливать нечего")
+            self.job["cancel_requested"] = True
+        cancel.request()
+        return self.summary()  # type: ignore[return-value]
 
     def summary(self) -> dict | None:
         """Задача для /api/state: без полного лога — хвост и длина (5.5)."""
@@ -256,7 +289,32 @@ class PanelAPI:
             "models": {"writer": self.cfg.writer.model, "verifier2": self.cfg.verifier2.model},
             "job": self.jobs.summary(),
             "lint": self.lint_summary(),
+            "author_today_min": round(self._author_today_seconds() / 60, 1),
         }
+
+    def _author_today_seconds(self) -> float:
+        """«Сегодня: N мин автора» (5.7): авторские интервалы истории всех глав за сегодняшнюю
+        (местную) дату — через timing.chapter_times по отфильтрованной истории."""
+        today = datetime.now().date()
+        total = 0.0
+        if not self.ws.chapters.exists():
+            return 0.0
+        for d in self.ws.chapters.iterdir():
+            if not (d.is_dir() and d.name.isdigit()):
+                continue
+            try:
+                history = ChapterState(self.ws, int(d.name)).data.get("история", [])
+            except Exception:  # noqa: BLE001 — повреждённая глава уже показана в очереди
+                continue
+            todays = []
+            for h in history:
+                try:
+                    if datetime.fromisoformat(h["время"]).astimezone().date() == today:
+                        todays.append(h)
+                except (KeyError, ValueError, TypeError):
+                    continue
+            total += timing.chapter_times(todays)[1]
+        return total
 
     def chapter(self, n: int) -> dict:
         st = ChapterState(self.ws, n)
@@ -375,22 +433,42 @@ class PanelAPI:
             edits = review.parse_edits_md(self.ws, n)
         return {"parsed": len(edits)}
 
-    def resolve(self, n: int, flag_id: str, decision: str, registry: str | None) -> dict:
+    @staticmethod
+    def _check_decision(decision: str, registry: str | None) -> None:
         from .canonist import REGISTRY_GLOBS
 
         if decision not in ("вычеркнуть", "канонизировать"):
             raise ValueError("решение: «вычеркнуть» или «канонизировать»")
         if decision == "канонизировать" and registry not in REGISTRY_GLOBS:
             raise ValueError(f"реестр: один из {', '.join(REGISTRY_GLOBS)}")
+
+    @staticmethod
+    def _decide(r, decision: str, registry: str | None) -> None:
+        r.decision = decision
+        r.target_registry = registry if decision == "канонизировать" else None
+
+    def resolve(self, n: int, flag_id: str, decision: str, registry: str | None) -> dict:
+        self._check_decision(decision, registry)
         with self.jobs.exclusive():
             resolutions = review.load_resolutions(self.ws, n)
             for r in resolutions:
                 if r.flag_id == flag_id:
-                    r.decision = decision  # type: ignore[assignment]
-                    r.target_registry = registry if decision == "канонизировать" else None
+                    self._decide(r, decision, registry)
                     review.save_resolutions(self.ws, n, resolutions)
                     return {"ok": True}
         raise ValueError(f"самоволка {flag_id} не найдена")
+
+    def resolve_all(self, n: int, decision: str, registry: str | None) -> dict:
+        """Одно решение для всех самоволок без решения (5.6, «Вычеркнуть все»); уже решённые не трогаются."""
+        self._check_decision(decision, registry)
+        with self.jobs.exclusive():
+            resolutions = review.load_resolutions(self.ws, n)
+            todo = [r for r in resolutions if r.decision is None]
+            for r in todo:
+                self._decide(r, decision, registry)
+            if todo:
+                review.save_resolutions(self.ws, n, resolutions)
+        return {"ok": True, "resolved": len(todo), "flag_ids": [r.flag_id for r in todo]}
 
     def save_canon_batch(self, n: int, text: str) -> dict:
         from . import guard
@@ -690,6 +768,31 @@ def _local_hosts(port: int) -> set[str]:
     return {f"127.0.0.1:{port}", f"localhost:{port}"}
 
 
+def _sanitize(message: str, api: PanelAPI) -> str:
+    """Сообщение об ошибке без абсолютных путей машины автора (5.4): корень рабочей области и
+    библиотеки заменяются словами. Порядок — от длинного к короткому, чтобы вложенный путь
+    библиотеки не превратился в «рабочая область/УГАР_Библиотека»."""
+    pairs: list[tuple[str, str]] = []
+    for root, word in ((api.library, "библиотека"), (api.ws.root, "рабочая область")):
+        for variant in {str(root), str(root.resolve()), root.as_posix(), root.resolve().as_posix()}:
+            if variant and variant not in ("/", "."):
+                pairs.append((variant, word))
+    for variant, word in sorted(pairs, key=lambda p: -len(p[0])):
+        message = message.replace(variant + "/", word + "/").replace(variant + "\\", word + "/").replace(variant, word)
+    return message
+
+
+def _log_exception(api: PanelAPI, method: str, path: str) -> None:
+    """Трейсбек 500-й ошибки — в logs/panel.log рабочей области (лучшее из возможного: сбой записи лога
+    не должен прятать сам ответ)."""
+    try:
+        api.ws.logs.mkdir(parents=True, exist_ok=True)
+        with (api.ws.logs / "panel.log").open("a", encoding="utf-8") as f:
+            f.write(f"{datetime.now(timezone.utc).isoformat()} {method} {path}\n{traceback.format_exc()}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def make_handler(api: PanelAPI):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # тихий сервер
@@ -709,7 +812,12 @@ def make_handler(api: PanelAPI):
             self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json")
 
         def _error(self, message: str, code: int = 400) -> None:
-            self._json({"error": message}, code)
+            self._json({"error": _sanitize(message, api)}, code)
+
+        def _internal(self, e: Exception) -> None:
+            """500: автору — короткое сообщение, трейсбек — в logs/panel.log (не в браузер)."""
+            _log_exception(api, self.command, self.path)
+            self._error(f"внутренняя ошибка сервера: {e} — подробности в logs/panel.log", 500)
 
         def _port(self) -> int:
             return int(self.server.server_address[1])
@@ -786,6 +894,8 @@ def make_handler(api: PanelAPI):
                     return self._json(api.api_log())
                 if path == "/api/job":
                     return self._json(api.jobs.full())
+                if path.startswith("/api/"):
+                    return self._error("нет такого пути API", 404)  # не index.html с 200 (5.4)
                 if path == "/dashboard":
                     from . import dashboard
 
@@ -794,10 +904,12 @@ def make_handler(api: PanelAPI):
                 return self._static(path)
             except FileNotFoundError as e:
                 self._error(str(e), 404)
+            except Busy as e:
+                self._error(str(e), 423)
             except ValueError as e:
                 self._error(str(e), 400)
             except Exception as e:
-                self._error(str(e), 500)
+                self._internal(e)
 
         def _static(self, path: str) -> None:
             root = _static_root()
@@ -826,6 +938,11 @@ def make_handler(api: PanelAPI):
                 if path == "/api/command":
                     job = api.run_command(body.get("cmd", ""), body.get("chapter"), body.get("params"))
                     return self._json({"job": job})
+                if path == "/api/job/cancel":
+                    return self._json({"job": api.jobs.cancel()})
+                m = re.fullmatch(r"/api/chapter/(\d+)/resolve-all", path)
+                if m:
+                    return self._json(api.resolve_all(int(m.group(1)), body.get("decision", ""), body.get("registry")))
                 m = re.fullmatch(r"/api/chapter/(\d+)/edits", path)
                 if m:
                     return self._json(api.save_edits(int(m.group(1)), str(body.get("text", ""))))
@@ -869,11 +986,16 @@ def make_handler(api: PanelAPI):
                 self._error(f"тело запроса больше {MAX_BODY // (1024 * 1024)} МБ", 413)
             except VersionConflict as e:
                 # отдельный код: панель предлагает «различия / перечитать / перезаписать» (аудит 5.2)
-                self._json({"error": str(e), "code": "конфликт"}, 409)
+                self._json({"error": _sanitize(str(e), api), "code": "конфликт"}, 409)
+            except FileNotFoundError as e:
+                self._error(str(e), 404)
+            except Busy as e:
+                # сервер занят задачей/операцией: панель показывает «занят», а не «ошибка ввода» (5.4)
+                self._error(str(e), 423)
             except (ValueError, RuntimeError) as e:
                 self._error(str(e), 400)
             except Exception as e:
-                self._error(str(e), 500)
+                self._internal(e)
 
     return Handler
 

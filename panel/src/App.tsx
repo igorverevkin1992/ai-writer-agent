@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { apiGet, apiPost } from "./api";
+import { apiGet, apiPost, isOffline, OFFLINE_MESSAGE } from "./api";
 import { ChapterView } from "./ChapterView";
 import { Canon } from "./Canon";
 import { Circles } from "./Circles";
 import { useConfirm } from "./Confirm";
 import { createDirtyRegistry, DirtyContext } from "./drafts";
-import { usePending } from "./hooks";
+import { useOnline, usePending } from "./hooks";
+import { JobCard } from "./JobCard";
+import type { Tab } from "./nextstep";
 import type { ApiLogRow, AppState, Job } from "./types";
 
 type View =
@@ -18,6 +20,16 @@ type View =
 
 export type Notify = (text: string, kind?: "ok" | "err") => void;
 export type RunCommand = (cmd: string, chapter?: number, params?: Record<string, unknown>) => Promise<void>;
+/** просьба открыть вкладку главы (из карточки задачи или подсказки «Дальше») */
+export interface TabRequest { n: number; tab: Tab; tick: number }
+
+/** Задача из ответа сервера не должна затирать более новую (гонка runCommand ↔ опрос, 5.8):
+ *  ответ /api/state, стартовавший до POST /api/command, несёт старую задачу (или null). */
+export function newerJob(cur: Job | null, incoming: Job | null): Job | null {
+  if (!incoming) return cur;
+  if (!cur) return incoming;
+  return incoming.started >= cur.started ? incoming : cur;
+}
 
 // опрос /api/state: раз в секунду пока идёт задача, иначе — раз в 2,5 с
 const POLL_RUNNING_MS = 1000;
@@ -35,8 +47,11 @@ export default function App() {
   // на каждый ответ, а useEffect с интервалом перезапускался бы без задержки
   const prevJob = useRef<Job | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
+  const lastPollError = useRef<string | null>(null);
   const [confirm, confirmDialog] = useConfirm();
   const [pending, run] = usePending();
+  const online = useOnline();
+  const [tabRequest, setTabRequest] = useState<TabRequest | null>(null);
   // единый реестр «не сохранено» (аудит 5.1–5.3): поля ввода регистрируются по ключу,
   // смена вида проходит через go(), закрытие страницы — через beforeunload
   const dirty = useRef(createDirtyRegistry()).current;
@@ -51,17 +66,28 @@ export default function App() {
   const refresh = useCallback(async () => {
     try {
       const s = await apiGet<AppState>("/api/state");
-      setState(s);
+      // гонка runCommand ↔ опрос (5.8): задача из POST новее — ответ опроса её не затирает
+      let now: Job | null = s.job;
+      setState((cur) => {
+        now = newerJob(cur?.job ?? null, s.job);
+        return { ...s, job: now };
+      });
       // 5.2: задача завершилась — сменился started (новая задача уже закончилась,
       // например быстрый compile) или статус ушёл из «выполняется» → перечитать карточку
       const was = prevJob.current;
-      const now = s.job;
       if (now && now.status !== "выполняется" && (!was || was.started !== now.started || was.status === "выполняется")) {
         setRefreshTick((t) => t + 1);
       }
       prevJob.current = now;
+      lastPollError.current = null;
     } catch (e) {
-      notify(String(e));
+      // обрыв связи — баннер (useOnline), не тост каждые 2,5 с; прочие ошибки опроса — один раз
+      if (isOffline(e)) return;
+      const msg = String(e);
+      if (lastPollError.current !== msg) {
+        lastPollError.current = msg;
+        notify(msg);
+      }
     }
   }, [notify]);
 
@@ -108,25 +134,47 @@ export default function App() {
     async (cmd, chapter, params) => {
       try {
         const r = await apiPost<{ job: Job }>("/api/command", { cmd, chapter, params });
-        // ответ POST уже несёт задачу — кнопки блокируются сразу, не дожидаясь опроса
-        setState((s) => (s ? { ...s, job: r.job } : s));
+        // ответ POST уже несёт задачу — кнопки блокируются сразу, не дожидаясь опроса;
+        // более старый ответ опроса её не перезапишет (newerJob по started)
+        setState((s) => (s ? { ...s, job: newerJob(s.job, r.job) } : s));
       } catch (e) {
-        notify(String(e));
+        if (!isOffline(e)) notify(String(e));
       }
     },
     [notify],
   );
 
-  if (!state) return <div style={{ padding: 30 }}>Подключение к конвейеру…</div>;
+  /** Открыть главу на нужной вкладке (карточка задачи → «Окно / ручной режим», подсказка «Дальше»). */
+  const openTab = useCallback(
+    (n: number, tab: Tab) => {
+      go({ kind: "глава", n });
+      setTabRequest((r) => ({ n, tab, tick: (r?.tick ?? 0) + 1 }));
+    },
+    [go],
+  );
+
+  if (!state) {
+    return (
+      <div style={{ padding: 30 }}>
+        {online ? "Подключение к конвейеру…" : <div className="banner offline" role="alert">{OFFLINE_MESSAGE}</div>}
+      </div>
+    );
+  }
 
   const known = new Set(state.chapters.map((c) => c.chapter));
   const notStarted = state.briefs.filter((b) => !known.has(b.chapter));
-  const busy = running || pending;
+  const offline = !online;
+  const busy = running || pending || offline;
   const isActive = (n: number) => view?.kind === "глава" && view.n === n;
 
   return (
     <DirtyContext.Provider value={dirty}>
     <div className="layout">
+      {offline && (
+        <div className="banner offline" role="alert">
+          {OFFLINE_MESSAGE} — панель повторяет попытку подключения; кнопки заблокированы.
+        </div>
+      )}
       <aside className="sidebar">
         <div className="brand">КОНВЕЙЕР УГАР</div>
         <div className="muted">
@@ -137,6 +185,8 @@ export default function App() {
           <br />
           Канон:{" "}
           {state.lint === null ? "не проверялся" : state.lint.errors ? `ошибок ${state.lint.errors} ✗` : state.lint.warnings ? `предупреждений ${state.lint.warnings}` : "противоречий нет ✓"}
+          <br />
+          <span title="авторские паузы всех глав за сегодня (5.7)">сегодня: {state.author_today_min ?? 0} мин автора</span>
         </div>
         <div className="sidebtns">
           <button disabled={busy} onClick={() => run(() => runCommand("export"))}>Экспорт канона</button>
@@ -198,6 +248,7 @@ export default function App() {
       </aside>
 
       <main className="main">
+        {state.job && <JobCard job={state.job} offline={offline} notify={notify} onOpenManual={(n) => openTab(n, "ручной")} />}
         {view?.kind === "дашборд" && (
           <>
             <h1>Дашборд</h1>
@@ -207,7 +258,7 @@ export default function App() {
         {view?.kind === "журнал" && <ApiJournal />}
         {view?.kind === "круги" && (
           <Circles
-            busy={running}
+            busy={running || offline}
             runCommand={runCommand}
             notify={notify}
             confirm={confirm}
@@ -216,7 +267,7 @@ export default function App() {
           />
         )}
         {view?.kind === "канон" && (
-          <Canon busy={running} runCommand={runCommand} notify={notify} confirm={confirm} refreshTick={refreshTick} />
+          <Canon busy={running || offline} runCommand={runCommand} notify={notify} confirm={confirm} refreshTick={refreshTick} />
         )}
         {view?.kind === "поиск" && <SearchView q={view.q} notify={notify} />}
         {view?.kind === "глава" && (
@@ -224,7 +275,9 @@ export default function App() {
             key={view.n}
             chapter={view.n}
             job={state.job}
+            offline={offline}
             refreshTick={refreshTick}
+            tabRequest={tabRequest}
             runCommand={runCommand}
             notify={notify}
             confirm={confirm}

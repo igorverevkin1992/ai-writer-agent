@@ -1,10 +1,12 @@
-import { useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { apiGet, apiPost } from "./api";
-import type { Notify, RunCommand } from "./App";
+import type { Notify, RunCommand, TabRequest } from "./App";
 import type { Confirm } from "./Confirm";
-import { DirtyContext, readDraft, RestoredNote, useDirtyKeys, useDraft } from "./drafts";
+import { DirtyContext, readDraft, removeDraft, RestoredNote, useDirtyKeys, useDraft } from "./drafts";
+import { appendPair, countOccurrences, describeFound, hasParagraphBreak, parseEdits } from "./edits";
 import { highlight, type Mark } from "./highlight";
 import { usePending } from "./hooks";
+import { JOB_LABEL, nextStep, TAB_LABEL, TABS, type Tab } from "./nextstep";
 import type { ChapterDetail, Flag, Job, Resolution } from "./types";
 
 const AUTHOR_FIX_CONFIRM =
@@ -46,21 +48,19 @@ const MACHINE_STATES = new Set([
   "не-начато", "собрано", "сгенерировано", "верифицировано-1", "верифицировано-2", "правки",
 ]);
 
-type Tab = "чтение" | "правки" | "приёмка" | "ручной" | "история";
-const TABS: readonly Tab[] = ["чтение", "правки", "приёмка", "ручной", "история"];
-const TAB_LABEL: Record<Tab, string> = {
-  чтение: "Чтение с флагами", правки: "Правки", приёмка: "Приёмка", ручной: "Окно / ручной режим", история: "История",
-};
+const editsKey = (chapter: number) => `глава:${chapter}:правки`;
 
 export function ChapterView(props: {
   chapter: number;
   job: Job | null;
+  offline: boolean;
   refreshTick: number;
+  tabRequest: TabRequest | null;
   runCommand: RunCommand;
   notify: Notify;
   confirm: Confirm;
 }) {
-  const { chapter, job, refreshTick, runCommand, notify, confirm } = props;
+  const { chapter, job, offline, refreshTick, tabRequest, runCommand, notify, confirm } = props;
   const [d, setD] = useState<ChapterDetail | null>(null);
   const [tab, setTab] = useState<Tab>("чтение");
   const [pending, run] = usePending();
@@ -84,6 +84,13 @@ export function ChapterView(props: {
       if (q) dirtyRegistry.leave(dirtyPrefix);
       setTab(t);
     });
+  const switchTabRef = useRef(switchTab);
+  switchTabRef.current = switchTab;
+
+  // просьба извне открыть вкладку (карточка задачи → «Окно / ручной режим»)
+  useEffect(() => {
+    if (tabRequest && tabRequest.n === chapter) switchTabRef.current(tabRequest.tab);
+  }, [tabRequest, chapter]);
 
   const load = useCallback(() => {
     apiGet<ChapterDetail>(`/api/chapter/${chapter}`).then(setD).catch((e) => notify(String(e)));
@@ -93,10 +100,17 @@ export function ChapterView(props: {
 
   if (!d) return <p>Загрузка главы {chapter}…</p>;
 
-  const busy = job?.status === "выполняется" || pending;
+  const busy = job?.status === "выполняется" || pending || offline;
   const actions = ACTIONS[d.state] ?? [];
-  const diffClean = d.diff_report && d.diff_report.not_applied.length === 0 && d.diff_report.unauthorized.length === 0;
+  const diffClean = d.diff_report
+    ? d.diff_report.not_applied.length === 0 && d.diff_report.unauthorized.length === 0
+    : null;
   const unresolved = d.resolutions.filter((r) => !r.decision).length;
+  const ns = nextStep(d.state, {
+    unresolved, diffClean, hasEdits: d.edits_parsed.length > 0, hasBatch: d.canon_batch != null,
+  });
+  // задача другой главы — видна с пометкой; глобальные (без главы) — только в карточке вверху (5.5)
+  const otherJob = job && job.status === "выполняется" && job.chapter != null && job.chapter !== chapter ? job : null;
 
   const act = (a: { cmd: string; confirm?: string }) =>
     run(async () => {
@@ -126,6 +140,18 @@ export function ChapterView(props: {
       }
     });
 
+  const strikeAll = () =>
+    run(async () => {
+      if (!(await confirm(`Вычеркнуть все самоволки без решения (${unresolved})? Они не попадут в канон; Писатель уберёт их при внесении правок.`))) return;
+      try {
+        const r = await apiPost<{ resolved: number }>(`/api/chapter/${chapter}/resolve-all`, { decision: "вычеркнуть" });
+        notify(`Вычеркнуто самоволок: ${r.resolved}.`, "ok");
+        load();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
+
   return (
     <>
       <h1>
@@ -139,7 +165,16 @@ export function ChapterView(props: {
           </>
         )}
       </div>
-      <div className="muted">Дальше: {d.next}</div>
+      {ns.label && (
+        <div className="nextstep" data-testid="nextstep">
+          <strong>Дальше:</strong> {ns.label}{" "}
+          {ns.tab && ns.tab !== tab && (
+            <button type="button" className="link" onClick={() => switchTab(ns.tab as Tab)}>
+              открыть вкладку «{TAB_LABEL[ns.tab]}»
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="actions">
         {MACHINE_STATES.has(d.state) && (
@@ -165,61 +200,50 @@ export function ChapterView(props: {
         {d.state === "зафиксировано" && <span className="ok">Такт завершён ✓</span>}
       </div>
 
-      {job && (job.chapter === chapter || job.chapter == null) && <JobBox job={job} />}
+      {otherJob && (
+        <div className="jobnote" role="status">
+          Идёт задача «{JOB_LABEL[otherJob.name] ?? otherJob.name}» главы {otherJob.chapter} — кнопки этой главы ждут её завершения.
+        </div>
+      )}
 
       <div className="tabs" role="tablist">
         {TABS.map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : ""} onClick={() => switchTab(t)}
-            title={draftTabs.has(t) ? "есть несохранённый текст" : undefined}>
+          <button key={t} role="tab" aria-selected={tab === t}
+            className={(tab === t ? "on" : "") + (ns.tab === t && tab !== t ? " hint" : "")}
+            onClick={() => switchTab(t)}
+            title={draftTabs.has(t) ? "есть несохранённый текст" : ns.tab === t ? "следующий шаг — здесь" : undefined}>
+            {ns.tab === t && tab !== t && <span className="tab-arrow" aria-hidden="true">→ </span>}
             {TAB_LABEL[t]}
             {draftTabs.has(t) && <span className="tab-dot" aria-label="не сохранено">●</span>}
           </button>
         ))}
       </div>
 
-      {tab === "чтение" && <Reading d={d} reload={load} notify={notify} />}
+      {tab === "чтение" && (
+        <Reading d={d} reload={load} notify={notify} unresolved={unresolved} onStrikeAll={strikeAll} busy={busy} />
+      )}
       {tab === "правки" && <Edits d={d} reload={load} notify={notify} />}
-      {tab === "приёмка" && <Acceptance d={d} reload={load} notify={notify} unresolved={unresolved} />}
+      {tab === "приёмка" && (
+        <Acceptance d={d} reload={load} notify={notify} unresolved={unresolved} onStrikeAll={strikeAll} busy={busy} />
+      )}
       {tab === "ручной" && <ManualTab d={d} reload={load} notify={notify} busy={busy} />}
       {tab === "история" && <History d={d} />}
     </>
   );
 }
 
-/** Задача такта: в /api/state приходит только хвост лога; полный — по /api/job,
- *  и только пока вывод развёрнут (5.5). Перечитывается при росте лога. */
-function JobBox({ job }: { job: Job }) {
-  const [open, setOpen] = useState(false);
-  const [full, setFull] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    let alive = true;
-    apiGet<Job>("/api/job")
-      .then((j) => alive && setFull(j.output ?? ""))
-      .catch(() => alive && setFull(null));
-    return () => {
-      alive = false;
-    };
-  }, [open, job.output_len, job.status, job.started]);
-
-  return (
-    <div className="jobbox">
-      {job.status === "выполняется" ? <span className="spin" aria-hidden="true" /> : null}
-      <strong>{job.name}</strong> <span className={`badge b-${job.status}`}>{job.status}</span>{" "}
-      {job.output_len > 0 && (
-        <button style={{ marginLeft: 8 }} aria-expanded={open} onClick={() => setOpen(!open)}>
-          {open ? "скрыть вывод" : "показать вывод"}
-        </button>
-      )}
-      {open && <pre>{full ?? job.output_tail}</pre>}
-    </div>
-  );
-}
-
 // ------------------------------------------------------------ Чтение с флагами
 
-function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; notify: Notify }) {
+interface SelectionBox {
+  text: string;
+  top: number;
+  left: number;
+}
+
+function Reading(props: {
+  d: ChapterDetail; reload: () => void; notify: Notify; unresolved: number; onStrikeAll: () => void; busy: boolean;
+}) {
+  const { d, reload, notify, unresolved, onStrikeAll, busy } = props;
   const html = useMemo(() => {
     if (!d.text) return null;
     // один проход по позициям сырого текста, пересечения отбрасываются (5.3)
@@ -238,6 +262,39 @@ function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; 
 
   // решения возможны только когда есть resolutions.json — его создаёт «Пакет приёмки» (5.6)
   const hasResolutions = d.resolutions.length > 0;
+
+  // «выделил фрагмент → Заменить на…» (аудит 2, 5.6)
+  const proseWrap = useRef<HTMLDivElement>(null);
+  const [sel, setSel] = useState<SelectionBox | null>(null);
+  const [editor, setEditor] = useState<{ before: string; source: string } | null>(null);
+
+  const readSelection = useCallback(() => {
+    const s = window.getSelection();
+    const wrap = proseWrap.current;
+    if (!s || s.isCollapsed || !wrap || s.rangeCount === 0) return setSel(null);
+    const range = s.getRangeAt(0);
+    if (!wrap.contains(range.startContainer) || !wrap.contains(range.endContainer)) return setSel(null);
+    const text = s.toString();
+    if (!text.trim()) return setSel(null);
+    const rect = range.getBoundingClientRect();
+    const base = wrap.getBoundingClientRect();
+    setSel({ text, top: rect.top - base.top - 34, left: Math.max(0, rect.left - base.left) });
+  }, []);
+
+  useEffect(() => {
+    // выделение мышью или с клавиатуры (Shift+стрелки) — кнопка следует за ним; снято — исчезает
+    document.addEventListener("selectionchange", readSelection);
+    return () => document.removeEventListener("selectionchange", readSelection);
+  }, [readSelection]);
+
+  const openEditor = (before: string, source: string) => {
+    if (hasParagraphBreak(before)) {
+      notify("Выделите фрагмент внутри одного абзаца: пустая строка завершает «БЫЛО» в edits.md.");
+      return;
+    }
+    setEditor({ before: before.trim(), source });
+    setSel(null);
+  };
 
   return (
     <>
@@ -260,18 +317,42 @@ function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; 
         </>
       )}
 
-      <h2>Смысловые флаги (Э2)</h2>
+      <h2>
+        Смысловые флаги (Э2)
+        {hasResolutions && unresolved > 0 && (
+          <button type="button" className="danger h2btn" disabled={busy} onClick={onStrikeAll}
+            title="Одно решение для всех самоволок без решения">
+            Вычеркнуть все ({unresolved})
+          </button>
+        )}
+      </h2>
       {d.flags.length === 0 && <p className="muted">Флагов нет{d.state === "сгенерировано" || d.state === "собрано" ? " (Э2 ещё не запускался)" : ""}.</p>}
       {d.flags.map((f) => (
         <FlagCard key={f.flag_id} f={f} chapter={d.chapter}
           resolution={d.resolutions.find((r) => r.flag_id === f.flag_id)}
-          canResolve={hasResolutions} reload={reload} notify={notify} />
+          canResolve={hasResolutions} reload={reload} notify={notify}
+          onEdit={d.text ? () => openEditor(f.quote, `флаг ${f.flag_id}`) : undefined} />
       ))}
+
+      {editor && d.text != null && (
+        <ReplaceEditor key={editor.before + editor.source} chapter={d.chapter} text={d.text} before={editor.before}
+          source={editor.source} editsMd={d.edits_md} onClose={() => setEditor(null)} reload={reload} notify={notify} />
+      )}
 
       {html ? (
         <>
           <h2>Текст главы (черновик {d.draft})</h2>
-          <div className="prose" dangerouslySetInnerHTML={{ __html: html }} />
+          <p className="muted">Выделите фрагмент — появится кнопка «Заменить на…»: пара БЫЛО/СТАЛО уйдёт в edits.md.</p>
+          <div className="prose-wrap" ref={proseWrap} onMouseUp={readSelection}>
+            {sel && (
+              <button type="button" className="primary sel-btn" style={{ top: sel.top, left: sel.left }}
+                onMouseDown={(e: ReactMouseEvent) => e.preventDefault()} // не сбрасывать выделение
+                onClick={() => openEditor(sel.text, "выделение")}>
+                Заменить на…
+              </button>
+            )}
+            <div className="prose" dangerouslySetInnerHTML={{ __html: html }} />
+          </div>
         </>
       ) : (
         <p className="muted">Черновика ещё нет — начните такт кнопками выше.</p>
@@ -280,12 +361,69 @@ function Reading({ d, reload, notify }: { d: ChapterDetail; reload: () => void; 
   );
 }
 
+/** Пара «БЫЛО (из выделения или цитаты флага) → СТАЛО (ввод)» → в конец edits.md через API правок.
+ *  Если во вкладке «Правки» лежит несохранённый черновик — пара добавляется к нему, черновик сохраняется. */
+function ReplaceEditor(props: {
+  chapter: number; text: string; before: string; source: string; editsMd: string | null;
+  onClose: () => void; reload: () => void; notify: Notify;
+}) {
+  const { chapter, text, before, source, editsMd, onClose, reload, notify } = props;
+  const [after, setAfter] = useState("");
+  const [pending, run] = usePending();
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const found = describeFound(countOccurrences(text, before));
+  const key = editsKey(chapter);
+  const draft = readDraft(key);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const save = () =>
+    run(async () => {
+      const base = draft?.text ?? editsMd ?? "";
+      const next = appendPair(base, before, after);
+      try {
+        const r = await apiPost<{ parsed: number }>(`/api/chapter/${chapter}/edits`, { text: next });
+        removeDraft(key); // черновик вкладки «Правки» ушёл на сервер вместе с новой парой
+        notify(`Правка добавлена в edits.md (распознано правок — ${r.parsed}).`, "ok");
+        onClose();
+        reload();
+      } catch (e) {
+        notify(String(e));
+      }
+    });
+
+  return (
+    <div className="card replace" role="region" aria-label="Новая правка" data-testid="replace-editor">
+      <div className="row">
+        <strong>Новая правка</strong>
+        <span className="muted">источник: {source}{draft ? " · добавится к несохранённому черновику правок" : ""}</span>
+      </div>
+      <div className="muted">БЫЛО <span className={found.cls}>({found.text})</span>:</div>
+      <blockquote>{before}</blockquote>
+      <label className="muted" htmlFor="replace-after">СТАЛО (пусто — удалить фрагмент):</label>
+      <textarea id="replace-after" ref={inputRef} style={{ minHeight: 70 }} value={after}
+        onChange={(e) => setAfter(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+          if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) save();
+        }} />
+      <div className="actions">
+        <button className="primary" disabled={pending} onClick={save}>Добавить в правки (Ctrl+Enter)</button>
+        <button disabled={pending} onClick={onClose}>Отмена</button>
+      </div>
+    </div>
+  );
+}
+
 const REGISTRIES = ["3.1", "3.2", "3.3", "1.2"];
 
 function FlagCard(props: {
   f: Flag; chapter: number; resolution?: Resolution; canResolve: boolean; reload: () => void; notify: Notify;
+  onEdit?: () => void;
 }) {
-  const { f, chapter, resolution, canResolve, reload, notify } = props;
+  const { f, chapter, resolution, canResolve, reload, notify, onEdit } = props;
   const [registry, setRegistry] = useState(REGISTRIES[0]);
   const [pending, run] = usePending();
   const decide = (decision: string) =>
@@ -304,6 +442,11 @@ function FlagCard(props: {
       <span className={`badge b-${f.kind}`}>{badge}</span>{" "}
       <strong>{f.flag_id}</strong>
       {showType && <> · {f.type}</>} <a href={`#a-${f.flag_id}`}>¶</a>
+      {onEdit && f.quote.trim() && (
+        <button type="button" className="h2btn" onClick={onEdit} title="БЫЛО = цитата флага, СТАЛО — введите">
+          Сделать правку из флага
+        </button>
+      )}
       <blockquote>{f.quote}</blockquote>
       <div className="muted">{f.rule}. {f.recommendation}</div>
       {f.kind === "samovolka" && (
@@ -335,12 +478,18 @@ const EDITS_TEMPLATE = "БЫЛО: \nСТАЛО: \n\nУКАЗАНИЕ: \n";
 
 function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; notify: Notify }) {
   // черновик edits.md переживает перезагрузку и смену вида (аудит 5.3)
-  const ds = useDraft(`глава:${d.chapter}:правки`, d.edits_md ?? EDITS_TEMPLATE, `во вкладке «Правки» главы ${d.chapter}`);
+  const ds = useDraft(editsKey(d.chapter), d.edits_md ?? EDITS_TEMPLATE, `во вкладке «Правки» главы ${d.chapter}`);
   const text = ds.text;
   const [k1, setK1] = useState<number | null>(null);
   const [k2, setK2] = useState<number | null>(null);
   const [diff, setDiff] = useState<string[] | null>(null);
   const [pending, run] = usePending();
+  // живая проверка по тексту поля и черновика главы — без сохранения (5.6)
+  const parsed = useMemo(() => parseEdits(text), [text]);
+  const live = useMemo(
+    () => parsed.edits.map((e) => ({ ...e, count: e.before ? countOccurrences(d.text ?? "", e.before) : -1 })),
+    [parsed, d.text],
+  );
 
   const save = () =>
     run(async () => {
@@ -367,9 +516,15 @@ function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; no
       }
     });
 
+  const problems = live.filter((e) => e.count === 0 || e.count > 1).length + parsed.errors.length;
+
   return (
     <>
       <h2>edits.md — пары «БЫЛО/СТАЛО» и строки «УКАЗАНИЕ:»{ds.dirty && <span className="tab-dot"> · не сохранено</span>}</h2>
+      <p className="muted">
+        «БЫЛО» — дословная цитата из черновика {d.draft}; проверка ниже идёт по мере ввода, до сохранения.
+        Быстрее: во вкладке «Чтение с флагами» выделите фрагмент → «Заменить на…».
+      </p>
       <RestoredNote state={ds} />
       <textarea aria-label="edits.md" value={text} onChange={(e) => ds.setText(e.target.value)} />
       <div className="actions">
@@ -377,19 +532,32 @@ function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; no
         {ds.dirty && <button disabled={pending} onClick={ds.discard}>Отменить правки</button>}
       </div>
 
-      {d.edits_parsed.length > 0 && (
+      {(live.length > 0 || parsed.errors.length > 0) && (
         <>
-          <h2>Как парсер понял правки</h2>
-          {d.edits_parsed.map((e) => (
-            <div className="editrow" key={e.seq}>
-              <span className={e.found ? "ok" : "bad"}>{e.found ? "✓" : "✗"}</span>
-              <span>
-                <strong>{e.seq}.</strong>{" "}
-                {e.before ? <>БЫЛО: {e.before} → СТАЛО: {e.after}</> : <>УКАЗАНИЕ: {e.after}</>}
-                {!e.found && <span className="bad"> — «было» не найдено в черновике дословно</span>}
-              </span>
+          <h2>
+            Проверка правок по тексту поля{" "}
+            <span className={problems ? "bad" : "ok"}>({problems ? `замечаний: ${problems}` : "всё найдено дословно"})</span>
+          </h2>
+          {parsed.errors.map((e, i) => (
+            <div className="editrow" key={`err-${i}`}>
+              <span className="bad">✗</span>
+              <span className="bad">ошибка формата — {e}</span>
             </div>
           ))}
+          {live.map((e) => {
+            const f = e.before ? describeFound(e.count) : null;
+            return (
+              <div className="editrow" key={e.seq} data-testid="editrow">
+                <span className={f ? f.cls : "ok"}>{f ? (f.cls === "ok" ? "✓" : f.cls === "bad" ? "✗" : "‼") : "✓"}</span>
+                <span>
+                  <strong>{e.seq}.</strong>{" "}
+                  {e.before ? <>БЫЛО: {e.before} → СТАЛО: {e.after || <em className="muted">(удалить)</em>}</> : <>УКАЗАНИЕ: {e.after}</>}
+                  {f && <span className={f.cls}> — {f.text}</span>}
+                  {!f && <span className="muted"> — свободное указание, проверяется глазами</span>}
+                </span>
+              </div>
+            );
+          })}
         </>
       )}
 
@@ -424,8 +592,10 @@ function Edits({ d, reload, notify }: { d: ChapterDetail; reload: () => void; no
 
 // ------------------------------------------------------------------ Приёмка
 
-function Acceptance(props: { d: ChapterDetail; reload: () => void; notify: Notify; unresolved: number }) {
-  const { d, reload, notify, unresolved } = props;
+function Acceptance(props: {
+  d: ChapterDetail; reload: () => void; notify: Notify; unresolved: number; onStrikeAll: () => void; busy: boolean;
+}) {
+  const { d, reload, notify, unresolved, onStrikeAll, busy } = props;
   // пакет канониста: черновик в localStorage, пока пакет существует (аудит 5.3)
   const ds = useDraft(d.canon_batch != null ? `глава:${d.chapter}:приёмка` : null, d.canon_batch ?? "",
     `во вкладке «Приёмка» главы ${d.chapter}`);
@@ -471,7 +641,10 @@ function Acceptance(props: { d: ChapterDetail; reload: () => void; notify: Notif
       )}
 
       {unresolved > 0 && (
-        <p className="unresolved">Самоволок без решения: {unresolved} — вкладка «Чтение с флагами».</p>
+        <p className="unresolved">
+          Самоволок без решения: {unresolved} — вкладка «Чтение с флагами».{" "}
+          <button type="button" className="danger" disabled={busy} onClick={onStrikeAll}>Вычеркнуть все</button>
+        </p>
       )}
 
       <h2>Пакет записей в канон (canon_batch.md){ds.dirty && <span className="tab-dot"> · не сохранено</span>}</h2>
