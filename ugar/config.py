@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from . import guard
 from .paths import Workspace
 
 # Д-8: git принимает --author только в виде «Имя <email>»
@@ -48,6 +49,14 @@ class Config(BaseModel):
     backup_remotes_min: int = 2            # NFR-6
     backup_dir: str | None = None          # архив рабочей области (chapters/, logs/…); None = ../УГАР_бэкап по запросу
     backup_keep: int = 10                  # сколько последних архивов хранить
+    volume: int = 1                        # текущий том рабочей области (аудит 2, п. 27): главы, экспорт, документы канона
+
+    @field_validator("volume")
+    @classmethod
+    def _volume_positive(cls, v: int) -> int:
+        if int(v) < 1:
+            raise ValueError(f"volume в config.yaml — номер тома, целое число ≥ 1, получено: {v}.")
+        return int(v)
 
     @field_validator("commit_author")
     @classmethod
@@ -89,3 +98,22 @@ def _load_dotenv(path: Path) -> None:
             continue
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_VOLUME_LINE_RE = re.compile(r"^volume\s*:.*$", re.MULTILINE)
+
+
+def set_volume(ws: Workspace, volume: int) -> Path:
+    """Переключает текущий том в config.yaml (`ugar volume open/close`), не трогая остальные строки
+    и комментарии автора: правится (или дописывается) только строка `volume: N`."""
+    if int(volume) < 1:
+        raise ValueError(f"номер тома должен быть ≥ 1, получено: {volume}.")
+    path = ws.root / "config.yaml"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    line = f"volume: {int(volume)}"
+    if _VOLUME_LINE_RE.search(text):
+        text = _VOLUME_LINE_RE.sub(line, text, count=1)
+    else:
+        text = (text.rstrip("\n") + "\n" if text.strip() else "") + f"# Текущий том рабочей области (`ugar volume open N`).\n{line}\n"
+    guard.write_text(path, text)
+    return path

@@ -277,7 +277,7 @@ def apply_batch(ws: Workspace, cfg: Config, library: Path, chapter: int, draft: 
         inbox: list[str] = []
         for registry, row in accepted_rows:
             glob = REGISTRY_GLOBS.get(registry)
-            target = sorted(library.glob(glob)) if glob else []
+            target = exporter.volume_docs(library, glob, ws.volume) if glob else []
             if not (target and row.strip().startswith("|") and _append_registry_row(target[0], registry, row.strip())):
                 inbox.append(f"- РЕЕСТР {registry}: {row}")
         # 3) статус закладок главы: положена (FR-K1); нет места для отметки — заметка во «Входящие»
@@ -289,7 +289,7 @@ def apply_batch(ws: Workspace, cfg: Config, library: Path, chapter: int, draft: 
             )
         # 4) кандидаты в правила вкуса → в конец 02 (разложит автор)
         if accepted_rules:
-            p02 = sorted(library.glob("02_*.md"))[0]
+            p02 = exporter.volume_docs(library, "02_*.md", ws.volume)[0]
             guard.append_text(
                 p02,
                 f"\n### Кандидаты конвейера (глава {chapter}) — разложить по §6.1/§6.2\n"
@@ -324,7 +324,7 @@ def _update_plants_status(ws: Workspace, library: Path, chapter: int) -> list[st
     ]
     if not plants:
         return []
-    files = sorted(library.glob("32_*.md"))
+    files = exporter.volume_docs(library, "32_*.md", ws.volume)
     if files:
         path = files[0]
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -338,7 +338,7 @@ def _update_plants_status(ws: Workspace, library: Path, chapter: int) -> list[st
         guard.write_text(path, "\n".join(lines) + "\n")
         return []
     notes = [f"- ЗАКЛАДКА {p.plant_id} «{p.what}» положена в главе {chapter} — отметьте в реестре закладок" for p in plants]
-    registry = sorted(library.glob("*Реестр_информационного_режима*.md"))
+    registry = exporter.volume_docs(library, "*Реестр_информационного_режима*.md", ws.volume)
     if not registry:
         return notes
     path = registry[0]

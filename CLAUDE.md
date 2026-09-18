@@ -20,6 +20,13 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
 - `ugar/cli.py` — все команды (`ugar …`); каждый шаг такта — отдельная команда
   (FR-O2), у долгих есть `--manual` для ручного режима (NFR-3).
 - `ugar/fsm.py` — конечный автомат главы (§5.4), состояние в `chapters/N/status.yaml`.
+- Тома (аудит 2, п. 27): `Config.volume` — текущий том; `cli._ctx()` отдаёт `ws.for_volume(cfg.volume)`;
+  `Workspace.chapter_dir(n)` → `chapters/001` (том 1, совместимость) или `chapters/Т2/001`;
+  `ws.chapter_dirs()` — папки глав текущего тома (server/timing/backup/fsm.all_states идут через него).
+  `exporter.run_export(lib, exports, logs, volume)` — выгрузки ВСЕГДА одного тома; документы тома —
+  только через `exporter.volume_docs(lib, pattern, volume)` (маркер `Том{N}`/`_Т{N}` в имени; потомные
+  документы без маркера = том 1). `ugar/volume.py` — `volume status|close|open` (снапшот 3.5 через
+  `canonchange`, тег `том-N`, рукопись `manuscript/ТомN.md|.docx`, статистика; переключение — `config.set_volume`).
 - `ugar/guard.py` — единственная точка записи (и удаления — `guard.remove`) файлов; путь в
   `УГАР_Библиотека/` открыт только внутри `canon_write_session()` (FR-K3) — не обходить.
 - `ugar/canonchange.py` — ЕДИНСТВЕННЫЙ открыватель `canon_write_session()` (статический тест):
@@ -48,7 +55,7 @@ cd panel && npm ci && npm run build   # пересборка React-панели 
   `ugar/llmjson.py`; деградация без API обязана сохраняться.
 - `ugar/circles.py` — круги истории = несущий каркас драматургии (Р-020): том → четыре акта
   (таблица в 2.1, Р-021; без неё акты = части реестра) → главы, каждый уровень внутри шага уровня выше. Черновики в `круги_истории/`; в канон
-  (`21_Круги_истории_Том1.md`, парсер `realcanon.parse_circles`) — только `commit_to_canon`
+  (`21_Круги_истории_Том{N}.md` — `circles.canon_doc_name(volume)`, парсер `realcanon.parse_circles`) — только `commit_to_canon`
   по подтверждению автора. Окно (секция «драматургия») и Э2 читают ТОЛЬКО канон (`circles.json`).
 - `ugar/lint.py` — линтер канона (противоречия/ошибки логики): машинные проверки по выгрузкам
   + модельный слой (`run_lint_llm`, шаблон `линтер_канона_система.md`); отчёт `logs/lint.json|md`.

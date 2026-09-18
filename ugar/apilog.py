@@ -8,6 +8,10 @@ from pathlib import Path
 
 from . import guard
 
+# Текущий том рабочей области (выставляет `cli._ctx()`): строки журнала несут «volume», чтобы
+# `ugar volume status` считал стоимость по главам тома; старые строки без поля — том 1.
+current_volume: int = 1
+
 
 def log_call(
     logs_dir: Path,
@@ -31,6 +35,7 @@ def log_call(
         "tokens_out": tokens_out,
         "cost_est": cost_est,
         "chapter": chapter,
+        "volume": current_volume,
         "duration": round(duration, 2) if duration is not None else None,
     }
     if error:

@@ -53,11 +53,55 @@ TZ_DEFAULT_NORMS = {
 }
 
 
-def _find_file(library: Path, pattern: str) -> Path:
+# ------------------------------------------------------------------ документы по томам
+
+# Маркер тома в имени документа: «…_Том2.md», «УГАР_Том2_Реестр…», «…_Т2.md» (аудит 2, п. 27).
+VOLUME_MARK_RE = re.compile(r"(?:Том|_Т)\s*0*(\d+)(?!\d)")
+# Документы, которые ведутся ПО ТОМАМ: для тома N ≥ 2 нужен файл с маркером тома, документы без
+# маркера принадлежат тому 1 (совместимость реальной библиотеки: `23_Поглавник_Часть_I.md`).
+PER_VOLUME_PATTERNS = ("23_*.md", "21_*.md", "31_*.md", "35_*.md", "*Реестр_информационного_режима*.md")
+
+
+def doc_volume(path: Path) -> int | None:
+    """Том по имени документа (None — маркера нет: документ общий для серии или тома 1)."""
+    m = VOLUME_MARK_RE.search(path.stem)
+    return int(m.group(1)) if m else None
+
+
+def volume_docs(library: Path, pattern: str, volume: int = 1) -> list[Path]:
+    """Документы канона по glob-шаблону ДЛЯ ТОМА `volume` (единственная точка выбора документа по тому):
+
+    * есть файлы с маркером нужного тома (`Том{N}`/`_Т{N}` в имени) — только они;
+    * иначе — файлы без маркера тома (общие для серии; для тома 1 — как раньше), но для потомных
+      документов (`PER_VOLUME_PATTERNS`) и тома N ≥ 2 файлы без маркера не подходят — это том 1;
+    * файлы с маркером ДРУГОГО тома не берутся никогда (документы томов не смешиваются).
+    """
     matches = sorted(library.glob(pattern))
+    marked = [p for p in matches if doc_volume(p) == volume]
+    if marked:
+        return marked
+    if volume >= 2 and pattern in PER_VOLUME_PATTERNS:
+        return []
+    return [p for p in matches if doc_volume(p) is None]
+
+
+def _find_file(library: Path, pattern: str, volume: int = 1) -> Path:
+    matches = volume_docs(library, pattern, volume)
     if not matches:
-        raise MarkupError(library / pattern, 0, "файл канона не найден")
+        hint = f" для тома {volume} (имя с «Том{volume}»)" if volume >= 2 else ""
+        raise MarkupError(library / pattern, 0, f"файл канона не найден{hint}")
     return matches[0]
+
+
+def missing_volume_docs(library: Path, volume: int) -> list[str]:
+    """Чего не хватает в библиотеке, чтобы вести том `volume`: поглавник/реестр (источник брифов)
+    и матрица 3.1. Пусто — том можно открыть (`ugar volume open N`)."""
+    missing: list[str] = []
+    if not volume_docs(library, "23_*.md", volume) and not volume_docs(library, "*Реестр_информационного_режима*.md", volume):
+        missing.append(f"23_Поглавник_Том{volume}.md (или УГАР_Том{volume}_Реестр_информационного_режима.md)")
+    if not volume_docs(library, "31_*.md", volume):
+        missing.append(f"31_…_Том{volume}.md (эпистемическая матрица тома)")
+    return missing
 
 
 def _render(model: BaseModel | list | dict) -> str:
@@ -111,8 +155,8 @@ def load_manifest(exports_dir: Path) -> dict[str, str]:
 # ------------------------------------------------------------------ разборы
 
 
-def export_norms(library: Path) -> dict[str, Norm]:
-    path = _find_file(library, "02_*.md")
+def export_norms(library: Path, volume: int = 1) -> dict[str, Norm]:
+    path = _find_file(library, "02_*.md", volume)
     norms: dict[str, Norm] = {}
     try:
         table = mdparse.require_table(path, ["id", "мин", "макс"], section_pattern=r"§\s*5")
@@ -159,16 +203,16 @@ def _journal(library: Path):
     return matches[0] if matches else library / "36_Журнал.md"
 
 
-def _registry(library: Path) -> Path | None:
-    matches = sorted(library.glob("*Реестр_информационного_режима*.md"))
+def _registry(library: Path, volume: int = 1) -> Path | None:
+    matches = volume_docs(library, "*Реестр_информационного_режима*.md", volume)
     return matches[0] if matches else None
 
 
-def export_stoplists(library: Path) -> list[StopRule]:
+def export_stoplists(library: Path, volume: int = 1) -> list[StopRule]:
     rules: list[StopRule] = []
 
     # 0.3 — стоп-листы линий (по фокалу)
-    p03 = _find_file(library, "03_*.md")
+    p03 = _find_file(library, "03_*.md", volume)
     try:
         t = mdparse.require_table(p03, ["rule_id", "фокал", "слова"])
         rows03 = t.rows
@@ -189,7 +233,7 @@ def export_stoplists(library: Path) -> list[StopRule]:
         )
 
     # 0.4 — лексика эпохи (по году главы)
-    p04 = _find_file(library, "04_*.md")
+    p04 = _find_file(library, "04_*.md", volume)
     try:
         t = mdparse.require_table(p04, ["rule_id", "слова", "годы"])
         rows04 = t.rows
@@ -217,7 +261,7 @@ def export_stoplists(library: Path) -> list[StopRule]:
         )
 
     # Р-016 — словарь наречий-усилителей: таблица в 02 либо текст решения в журнале 36
-    p02 = _find_file(library, "02_*.md")
+    p02 = _find_file(library, "02_*.md", volume)
     intensifiers: list[str] = []
     try:
         t = mdparse.require_table(p02, ["слово"], section_pattern=r"[Уу]силител")
@@ -240,8 +284,8 @@ def export_stoplists(library: Path) -> list[StopRule]:
     return rules
 
 
-def export_matrix(library: Path) -> list[MatrixFact]:
-    path = _find_file(library, "31_*.md")
+def export_matrix(library: Path, volume: int = 1) -> list[MatrixFact]:
+    path = _find_file(library, "31_*.md", volume)
     try:
         t = mdparse.require_table(path, ["fact_id", "факт", "субъект"])
     except MarkupError:
@@ -275,16 +319,16 @@ def _parse_place(text: str) -> dict:
     return place
 
 
-def export_plants(library: Path) -> list[Plant]:
-    if not sorted(library.glob("32_*.md")):
-        reg = _registry(library)
+def export_plants(library: Path, volume: int = 1) -> list[Plant]:
+    if not volume_docs(library, "32_*.md", volume):
+        reg = _registry(library, volume)
         if reg is not None:
             plants = realcanon.parse_plants_registry(reg)  # §7 «Реестр дальних закладок»
-            _, volume = realcanon.registry_year_volume(reg)
-            for p23 in sorted(library.glob("23_*.md")):
-                plants.extend(realcanon.parse_poglavnik_plants(p23, volume, plants))
+            _, reg_volume = realcanon.registry_year_volume(reg)
+            for p23 in volume_docs(library, "23_*.md", volume):
+                plants.extend(realcanon.parse_poglavnik_plants(p23, reg_volume, plants))
             return plants
-    path = _find_file(library, "32_*.md")
+    path = _find_file(library, "32_*.md", volume)
     t = mdparse.require_table(path, ["plant_id", "что", "положена"])
     plants = []
     for row in t.rows:
@@ -303,8 +347,8 @@ def export_plants(library: Path) -> list[Plant]:
     return plants
 
 
-def export_continuity(library: Path) -> list[ContinuityEvent]:
-    path = _find_file(library, "33_*.md")
+def export_continuity(library: Path, volume: int = 1) -> list[ContinuityEvent]:
+    path = _find_file(library, "33_*.md", volume)
     try:
         t = mdparse.require_table(path, ["дата", "событие"])
     except MarkupError:
@@ -320,11 +364,11 @@ def export_continuity(library: Path) -> list[ContinuityEvent]:
     ]
 
 
-def export_briefs(library: Path) -> list[Brief]:
+def export_briefs(library: Path, volume: int = 1) -> list[Brief]:
+    """Брифы глав ТОМА `volume` (поглавник 23 или реестр информрежима этого тома)."""
     briefs: list[Brief] = []
-    for path in sorted(library.glob("23_*.md")):
-        vol_m = re.search(r"Том\s*(\d+)", path.name)
-        volume = int(vol_m.group(1)) if vol_m else 1
+    for path in volume_docs(library, "23_*.md", volume):
+        doc_vol = doc_volume(path) or volume  # без маркера в имени — документ текущего тома (том 1)
         for sec in mdparse.parse_sections(path):
             m = re.match(r"Глава\s+(\d+)", sec.title)
             if not m:
@@ -340,7 +384,7 @@ def export_briefs(library: Path) -> list[Brief]:
             briefs.append(
                 Brief(
                     chapter=int(m.group(1)),
-                    volume=volume,
+                    volume=doc_vol,
                     date=date,
                     year=year,
                     focal=mdparse.parse_kv(body, "Фокал"),
@@ -354,15 +398,16 @@ def export_briefs(library: Path) -> list[Brief]:
                 )
             )
     if not briefs:
-        reg = _registry(library)
+        reg = _registry(library, volume)
         if reg is not None:
             known = _known_names(library)
             briefs = realcanon.parse_registry_briefs(reg, known)  # постраничная сетка на весь том
-            for p23 in sorted(library.glob("23_*.md")):
+            for p23 in volume_docs(library, "23_*.md", volume):
                 realcanon.enrich_from_poglavnik(briefs, p23, known)
             realcanon.enrich_from_dossiers(briefs, _real_dossier_paths(library), known)  # «Т.1: … гл. 41» в арке
     if not briefs:
-        raise MarkupError(library / "23_*.md", 0, "поглавник не найден или в нём нет секций «## Глава N»")
+        hint = f" для тома {volume} (нужен документ с «Том{volume}» в имени)" if volume >= 2 else ""
+        raise MarkupError(library / "23_*.md", 0, f"поглавник не найден{hint} или в нём нет секций «## Глава N»")
     return briefs
 
 
@@ -418,14 +463,14 @@ def export_dossiers(library: Path) -> list[Dossier]:
     return dossiers
 
 
-def export_infobans(library: Path) -> list[InfoBan]:
-    matches = sorted(library.glob("2.2_*.md"))
+def export_infobans(library: Path, volume: int = 1) -> list[InfoBan]:
+    matches = volume_docs(library, "2.2_*.md", volume)
     if not matches:
-        reg = _registry(library)
+        reg = _registry(library, volume)
         if reg is not None:
             # реестр тайн тома: глава раскрытия — из ячейки либо из матрицы 3.1 («Читатель»);
             # плюс строки §7 «НЕ упоминается в томе N» — запреты информрежима на весь том (аудит 1.5)
-            return realcanon.parse_secrets(reg, _known_names(library), export_matrix(library)) + realcanon.parse_plant_bans(reg)
+            return realcanon.parse_secrets(reg, _known_names(library), export_matrix(library, volume)) + realcanon.parse_plant_bans(reg)
         return []
     path = matches[0]
     t = mdparse.require_table(path, ["ban_id", "запрет"])
@@ -455,9 +500,9 @@ def find_corpus_file(corpus_dir: Path, chapter: int, volume: int | None = None) 
     return None
 
 
-def export_parts(library: Path) -> list[dict]:
+def export_parts(library: Path, volume: int = 1) -> list[dict]:
     """Части (акты) тома — из заголовков реестра информрежима; в демо — пусто."""
-    reg = _registry(library)
+    reg = _registry(library, volume)
     return realcanon.parse_parts(reg) if reg is not None else []
 
 
@@ -468,9 +513,9 @@ def load_parts(exports_dir: Path) -> list[dict]:
 CIRCLES_DOC_GLOB = "21_Круги_истории*.md"
 
 
-def export_circles(library: Path) -> list[StoryCircle]:
+def export_circles(library: Path, volume: int = 1) -> list[StoryCircle]:
     """Круги истории (2.1, Р-020) — несущий каркас драматургии; документа может ещё не быть."""
-    docs = sorted(library.glob(CIRCLES_DOC_GLOB))
+    docs = volume_docs(library, CIRCLES_DOC_GLOB, volume)
     return realcanon.parse_circles(docs[0]) if docs else []
 
 
@@ -478,9 +523,9 @@ def load_circles(exports_dir: Path) -> list[StoryCircle]:
     return [StoryCircle.model_validate(c) for c in load_export(exports_dir, "circles.json")]
 
 
-def export_acts(library: Path) -> list[Act]:
+def export_acts(library: Path, volume: int = 1) -> list[Act]:
     """Акты тома (Р-021) — таблица документа 2.1; если её нет — акты = части реестра."""
-    docs = sorted(library.glob(CIRCLES_DOC_GLOB))
+    docs = volume_docs(library, CIRCLES_DOC_GLOB, volume)
     acts = realcanon.parse_acts(docs[0]) if docs else []
     if acts:
         return acts
@@ -488,7 +533,7 @@ def export_acts(library: Path) -> list[Act]:
     return [
         Act(act=p["part"], title=p["title"], from_chapter=p["from_chapter"], to_chapter=p["to_chapter"],
             parts=roman[p["part"] - 1] if 0 < p["part"] <= len(roman) else str(p["part"]))
-        for p in export_parts(library)
+        for p in export_parts(library, volume)
     ]
 
 
@@ -496,9 +541,9 @@ def load_acts(exports_dir: Path) -> list[Act]:
     return [Act.model_validate(a) for a in load_export(exports_dir, "acts.json")]
 
 
-def export_doses(library: Path) -> list[Dose]:
+def export_doses(library: Path, volume: int = 1) -> list[Dose]:
     """Дозы прошлого — §5 реестра информрежима «Три дозы 1913 года»; без реестра/раздела — пусто."""
-    reg = _registry(library)
+    reg = _registry(library, volume)
     return realcanon.parse_doses(reg) if reg is not None else []
 
 
@@ -506,9 +551,9 @@ def load_doses(exports_dir: Path) -> list[Dose]:
     return [Dose.model_validate(d) for d in load_export(exports_dir, "doses.json")]
 
 
-def export_documents(library: Path) -> list[DocumentSpec]:
+def export_documents(library: Path, volume: int = 1) -> list[DocumentSpec]:
     """Документы-вставки — §6 реестра информрежима «Реестр документов»; без реестра/раздела — пусто."""
-    reg = _registry(library)
+    reg = _registry(library, volume)
     return realcanon.parse_documents(reg) if reg is not None else []
 
 
@@ -584,8 +629,12 @@ def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
 # --------------------------------------------------------------- запуск
 
 
-def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, str]:
-    """Перегенерирует все выгрузки (FR-X1). Возвращает {файл: sha256}.
+def run_export(library: Path, exports_dir: Path, logs_dir: Path, volume: int = 1) -> dict[str, str]:
+    """Перегенерирует все выгрузки (FR-X1) ДЛЯ ТОМА `volume` (текущий том рабочей области, `ws.volume`):
+    потомные документы (поглавник/реестр, матрица 3.1, круги 2.1) берутся по тому через `volume_docs`,
+    документы других томов в выгрузки не попадают; общие документы серии (02–04, 12, 17, 33…) — как есть.
+    Корпус (`corpus/`) — по всей `Проза/` (том в имени файла, `find_corpus_file`/`corpus_scope` фильтруют).
+    Возвращает {файл: sha256}.
 
     Сначала разбирается ВЕСЬ канон (включая план корпуса), и только затем пишутся файлы: ошибка
     структуры в одном документе не оставляет exports/ в смешанном состоянии
@@ -593,21 +642,21 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, st
     выгрузки (сравнение с manifest.json и содержимым на диске, 26а).
     """
     parsed = {
-        "norms.json": export_norms(library),
-        "stoplists.json": export_stoplists(library),
-        "matrix.json": export_matrix(library),
-        "plants.json": export_plants(library),
-        "continuity.json": export_continuity(library),
-        "briefs.json": export_briefs(library),
+        "norms.json": export_norms(library, volume),
+        "stoplists.json": export_stoplists(library, volume),
+        "matrix.json": export_matrix(library, volume),
+        "plants.json": export_plants(library, volume),
+        "continuity.json": export_continuity(library, volume),
+        "briefs.json": export_briefs(library, volume),
         "dossiers.json": export_dossiers(library),
-        "infobans.json": export_infobans(library),
-        "parts.json": export_parts(library),
-        "circles.json": export_circles(library),
-        "acts.json": export_acts(library),
-        "doses.json": export_doses(library),
-        "documents.json": export_documents(library),
-        "chronicle.json": export_chronicle(library),
-        "chronology.json": export_chronology(library),
+        "infobans.json": export_infobans(library, volume),
+        "parts.json": export_parts(library, volume),
+        "circles.json": export_circles(library, volume),
+        "acts.json": export_acts(library, volume),
+        "doses.json": export_doses(library, volume),
+        "documents.json": export_documents(library, volume),
+        "chronicle.json": export_chronicle(library, volume),
+        "chronology.json": export_chronology(library, volume),
     }
     corpus_plan, old_index = _corpus_plan(library, exports_dir)  # тоже до записи
     known = load_manifest(exports_dir)
@@ -616,7 +665,7 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path) -> dict[str, st
         hashes[name] = _dump(exports_dir / name, data, known.get(name))
     hashes.update(_write_corpus(corpus_plan, exports_dir, old_index))
 
-    manifest = {"files": hashes}
+    manifest = {"files": hashes, "volume": volume}
     _write_if_changed(exports_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     guard.append_text(
         logs_dir / "export.jsonl",
@@ -646,9 +695,9 @@ def load_norms(exports_dir: Path) -> dict[str, Norm]:
     return {k: Norm.model_validate(v) for k, v in load_export(exports_dir, "norms.json").items()}
 
 
-def export_chronicle(library: Path) -> list:
+def export_chronicle(library: Path, volume: int = 1) -> list:
     """Историческая хроника 17 (анахронизмы, 4.2). Документа может не быть (демо) — пустой список."""
-    for path in sorted(library.glob("17_*.md")):
+    for path in volume_docs(library, "17_*.md", volume):
         return realcanon.parse_chronicle(path)
     return []
 
@@ -656,10 +705,10 @@ def export_chronicle(library: Path) -> list:
 CHRONOLOGY_DOC_GLOB = "12_*.md"
 
 
-def export_chronology(library: Path) -> list[ChronologyEvent]:
+def export_chronology(library: Path, volume: int = 1) -> list[ChronologyEvent]:
     """Генеральная хронология фабулы 12 (позвоночник цикла: события Ф-19xx-NN, тома, главы).
     Документа может не быть (демо) — пустой список."""
-    for path in sorted(library.glob(CHRONOLOGY_DOC_GLOB)):
+    for path in volume_docs(library, CHRONOLOGY_DOC_GLOB, volume):
         return realcanon.parse_chronology(path)
     return []
 
@@ -695,10 +744,21 @@ def load_briefs(exports_dir: Path) -> list[Brief]:
 
 
 def load_brief(exports_dir: Path, chapter: int) -> Brief:
+    """Бриф главы текущего тома (выгрузки всегда одного тома — `run_export(volume=…)`)."""
     for b in load_briefs(exports_dir):
         if b.chapter == chapter:
             return b
     raise FileNotFoundError(f"В поглавнике (briefs.json) нет главы {chapter}.")
+
+
+def export_volume(exports_dir: Path) -> int | None:
+    """Том, для которого сделаны выгрузки (manifest.json); None — экспорта не было или он старого формата."""
+    try:
+        data = json.loads((exports_dir / "manifest.json").read_text(encoding="utf-8"))
+        v = data.get("volume") if isinstance(data, dict) else None
+        return int(v) if v is not None else None
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def load_continuity(exports_dir: Path) -> list[ContinuityEvent]:

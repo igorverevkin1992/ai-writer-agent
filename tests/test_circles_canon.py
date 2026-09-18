@@ -144,7 +144,7 @@ def test_без_таблицы_актов_акты_равны_частям(ws, l
     from ugar import exporter as ex
     orig = ex.export_parts
     try:
-        ex.export_parts = lambda lib: parts
+        ex.export_parts = lambda lib, volume=1: parts
         acts = ex.export_acts(library)
     finally:
         ex.export_parts = orig

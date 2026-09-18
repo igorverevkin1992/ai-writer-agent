@@ -21,7 +21,7 @@ def build_snapshot(ws: Workspace, volume: int) -> Path:
     matrix = exporter.load_matrix(ws.exports)
     plants = exporter.load_plants(ws.exports)
     continuity = exporter.load_continuity(ws.exports)
-    states = {st.chapter: st.state for st in all_states(ws)}
+    states = {st.chapter: st.state for st in all_states(ws, volume)}
 
     lines = [
         f"# Снапшот · Том {volume} (реестр 3.5)",
@@ -60,6 +60,6 @@ def build_snapshot(ws: Workspace, volume: int) -> Path:
     for b in sorted(briefs, key=lambda b: b.chapter):
         lines.append(f"- Глава {b.chapter} ({b.focal}): {states.get(b.chapter, 'не-начато')}")
 
-    path = ws.root / "snapshots" / f"Том{volume}_срез.md"
+    path = ws.snapshots / f"Том{volume}_срез.md"
     guard.write_text(path, "\n".join(lines) + "\n")
     return path

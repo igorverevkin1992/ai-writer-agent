@@ -59,6 +59,8 @@ export interface LintSummary { errors: number; warnings: number; notes: number; 
 
 export interface AppState {
   workspace: string;
+  /** текущий том рабочей области (config.yaml: volume); очередь и главы — этого тома */
+  volume?: number;
   chapters: QueueChapter[];
   briefs: Brief[];
   regression_green: boolean | null;

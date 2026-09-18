@@ -178,6 +178,10 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">КОНВЕЙЕР УГАР</div>
         <div className="muted">
+          <span title="текущий том рабочей области (config.yaml: volume; сменить — `ugar volume open N`)">
+            Том {state.volume ?? 1}
+          </span>
+          <br />
           Писатель: {state.models.writer}
           <br />
           Регрессия:{" "}
@@ -229,7 +233,7 @@ export default function App() {
           />
         </form>
 
-        <div className="muted" style={{ margin: "6px 0" }} id="queue-title">Очередь глав</div>
+        <div className="muted" style={{ margin: "6px 0" }} id="queue-title">Очередь глав · том {state.volume ?? 1}</div>
         <div role="list" aria-labelledby="queue-title">
           {state.chapters.map((c) => (
             <QueueItem key={c.chapter} active={isActive(c.chapter)} onOpen={() => go({ kind: "глава", n: c.chapter })}>

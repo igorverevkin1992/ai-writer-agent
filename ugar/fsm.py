@@ -57,23 +57,29 @@ class StatusFileError(RuntimeError):
 
 
 class ChapterState:
+    """Состояние главы ТЕКУЩЕГО тома рабочей области (`ws.volume`); другой том — `ChapterState(ws.for_volume(v), n)`."""
+
     def __init__(self, ws: Workspace, chapter: int):
         self.ws = ws
         self.chapter = chapter
+        self.volume = ws.volume
         self.path: Path = ws.status_path(chapter)
+        rel = ws.chapter_rel(chapter)
         if self.path.exists():
             try:
                 data = yaml.safe_load(self.path.read_text(encoding="utf-8"))
             except yaml.YAMLError as e:
-                raise StatusFileError(f"chapters/{chapter:03d}/status.yaml повреждён (не YAML): {e}") from None
+                raise StatusFileError(f"{rel}/status.yaml повреждён (не YAML): {e}") from None
             if not isinstance(data, dict) or data.get("состояние") not in STATES:
                 raise StatusFileError(
-                    f"chapters/{chapter:03d}/status.yaml повреждён: нет допустимого поля «состояние» "
+                    f"{rel}/status.yaml повреждён: нет допустимого поля «состояние» "
                     f"(файл пуст или усечён). Восстановите его из истории/бэкапа или удалите папку главы."
                 )
             self.data = data
         else:
             self.data = {"глава": chapter, "состояние": "не-начато", "черновик": 0, "авто_повторов": 0, "итераций_правок": 0, "история": []}
+            if self.volume != 1:
+                self.data["том"] = self.volume  # том 1 — без поля (совместимость старых status.yaml)
 
     @property
     def state(self) -> str:
@@ -173,10 +179,8 @@ class ChapterState:
             )
 
 
-def all_states(ws: Workspace) -> list[ChapterState]:
-    result = []
-    if ws.chapters.exists():
-        for d in sorted(ws.chapters.iterdir()):
-            if d.is_dir() and d.name.isdigit():
-                result.append(ChapterState(ws, int(d.name)))
-    return result
+def all_states(ws: Workspace, volume: int | None = None) -> list[ChapterState]:
+    """Главы текущего тома рабочей области (или тома `volume`) по возрастанию номера."""
+    if volume is not None and volume != ws.volume:
+        ws = ws.for_volume(volume)
+    return [ChapterState(ws, n) for n, _ in ws.chapter_dirs()]

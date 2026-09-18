@@ -538,11 +538,12 @@ def run_checks(library: Path, exports_dir: Path, briefs: list[Brief], matrix: li
                infobans: list[InfoBan], plants: list[Plant], parts: list[dict], acts: list[Act],
                known: set[str], reg_path: Path | None) -> list[LintFinding]:
     """Все проверки модуля по уже загруженным выгрузкам. Ничего не пишет в библиотеку."""
+    volume = briefs[0].volume if briefs else 1
     reg = _Doc(library, reg_path)
-    pog = _Doc(library, next(iter(sorted(library.glob("23_*.md"))), None))
-    mtx_path = next(iter(sorted(library.glob("31_*.md"))), None)
+    pog = _Doc(library, next(iter(exporter.volume_docs(library, "23_*.md", volume)), None))
+    mtx_path = next(iter(exporter.volume_docs(library, "31_*.md", volume)), None)
     mtx = _Doc(library, mtx_path)
-    acts_doc = _Doc(library, next(iter(sorted(library.glob("21_*.md"))), None))
+    acts_doc = _Doc(library, next(iter(exporter.volume_docs(library, "21_*.md", volume)), None))
     secret_rows = _secret_rows(reg)
     findings = check_matrix_presence(matrix, briefs, mtx)
     findings += check_matrix_order(matrix, briefs, mtx, _matrix_reader_cells(mtx_path))

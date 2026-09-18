@@ -614,7 +614,7 @@ def run_checks(library: Path, exports_dir: Path, briefs: list[Brief], parts: lis
                volume: int) -> list[LintFinding]:
     """Все проверки модуля по уже сделанным выгрузкам. Ничего не пишет."""
     docs = _Docs(library)
-    p23 = next(iter(sorted(library.glob("23_*.md"))), None)
+    p23 = next(iter(exporter.volume_docs(library, "23_*.md", volume)), None)
     doses = exporter.load_doses(exports_dir)
     documents = exporter.load_documents(exports_dir)
     chronicle = exporter.load_chronicle(exports_dir)

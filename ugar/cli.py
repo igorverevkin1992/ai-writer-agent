@@ -20,6 +20,7 @@ import typer
 
 from . import (
     adapters,
+    apilog,
     backup as backup_mod,
     cancel,
     canonchange,
@@ -34,9 +35,10 @@ from . import (
     timing,
     verifier1,
     verifier2,
+    volume as volume_mod,
     writer,
 )
-from .config import Config, library_dir, load_config
+from .config import Config, library_dir, load_config, set_volume
 from .fsm import STATES, ChapterState, TransitionError, all_states
 from .mdparse import MarkupError
 from .paths import Workspace, find_workspace
@@ -76,10 +78,14 @@ def _root(
 
 
 def _ctx() -> tuple[Workspace, Config, Path]:
+    """Рабочая область ТЕКУЩЕГО тома (`config.yaml: volume`; аудит 2, п. 27): пути глав, выгрузки,
+    документы канона и журнал API привязаны к нему."""
     ws = find_workspace()
     cfg = load_config(ws)
+    ws = ws.for_volume(cfg.volume)
     lib = library_dir(ws, cfg)
     guard.set_library_dir(lib)
+    apilog.current_volume = ws.volume
     return ws, cfg, lib
 
 
@@ -151,10 +157,10 @@ def cmd_export() -> None:
     """Перегенерировать все выгрузки из MD-библиотеки (FR-X1…FR-X3)."""
     ws, cfg, lib = _ctx()
     try:
-        hashes = exporter.run_export(lib, ws.exports, ws.logs)
+        hashes = exporter.run_export(lib, ws.exports, ws.logs, ws.volume)
     except MarkupError as e:
         _fail(f"структура MD расходится с соглашениями Д-1 → {e}")
-    typer.secho(f"Выгрузки обновлены: {len(hashes)} файлов в {ws.exports}/", fg=typer.colors.GREEN)
+    typer.secho(f"Выгрузки обновлены (том {ws.volume}): {len(hashes)} файлов в {ws.exports}/", fg=typer.colors.GREEN)
 
 
 @app.command("compile", rich_help_panel="Такт главы")
@@ -163,7 +169,7 @@ def cmd_compile(chapter: int) -> None:
     """Собрать окно контекста главы N (FR-C1…FR-C6). Экспорт выполняется автоматически (риск R-5)."""
     ws, cfg, lib = _ctx()
     try:
-        exporter.run_export(lib, ws.exports, ws.logs)
+        exporter.run_export(lib, ws.exports, ws.logs, ws.volume)
         path, breakdown = compiler.compile_window(ws, lib, chapter, cfg.window_soft_limit_chars)
     except MarkupError as e:
         _fail(str(e))
@@ -690,16 +696,21 @@ def _chapter_flags_summary(ws: Workspace, chapter: int) -> tuple[str, str]:
 @_friendly
 def cmd_status(
     chapter: int | None = typer.Argument(None, help="Номер главы — подробная карточка."),
+    volume: int | None = typer.Option(None, "--том", "--volume", help="Том (по умолчанию — текущий из config.yaml)."),
 ) -> None:
-    """Состояния глав и следующий шаг (FR-D2); `ugar status N` — карточка главы."""
+    """Состояния глав и следующий шаг (FR-D2); `ugar status N` — карточка главы; `--том N` — главы тома N."""
     ws, cfg, lib = _ctx()
+    volume = _opt(volume, None)
+    if volume is not None and volume != ws.volume:
+        ws = ws.for_volume(volume)
     if chapter is not None:
         _status_detail(ws, chapter)
         return
     states = all_states(ws)
     if not states:
-        typer.echo("Глав в работе нет. Начните: `ugar compile N`.")
+        typer.echo(f"Глав тома {ws.volume} в работе нет. Начните: `ugar compile N`.")
         return
+    typer.echo(f"Том {ws.volume} · главы в {ws.chapters_root().relative_to(ws.root).as_posix()}/")
     typer.echo(f"{'Глава':>6} | {'Состояние':<18} | {'Чернов.':>7} | {'Э1':<16} | {'Э2':<22} | Дальше")
     typer.echo("-" * 110)
     for st in states:
@@ -987,7 +998,7 @@ def cmd_circles(
         if not n:
             _fail("черновиков кругов нет — сначала `ugar circles`.")
         if not yes and not typer.confirm(
-            f"Внести {n} круг(ов) в {circles_mod.CANON_DOC} библиотеки и закоммитить? (Д-8) (y)"
+            f"Внести {n} круг(ов) в {circles_mod.canon_doc_name(ws.volume)} библиотеки и закоммитить? (Д-8) (y)"
         ):
             raise typer.Exit()
         try:
@@ -1035,7 +1046,7 @@ def cmd_lint(
 
     def once() -> int:
         try:
-            report = lint_mod.run_lint(lib, ws.exports, ws.logs)
+            report = lint_mod.run_lint(lib, ws.exports, ws.logs, volume=ws.volume)
         except Exception as e:  # noqa: BLE001 — сбой линтера виден как находка, не как трейсбек
             report = lint_mod.error_report(e, ws.logs)
         if llm:
@@ -1095,15 +1106,126 @@ def cmd_lint(
 
 @app.command("snapshot", rich_help_panel="Канон и бэкап")
 @_friendly
-def cmd_snapshot(volume: int = typer.Argument(1, help="Номер тома.")) -> None:
-    """Черновик снапшота тома (реестр 3.5): кто что знает, закладки, хронология."""
+def cmd_snapshot(volume: int | None = typer.Argument(None, help="Номер тома (по умолчанию — текущий).")) -> None:
+    """Черновик снапшота тома (реестр 3.5): кто что знает, закладки, хронология.
+    В канон снапшот вносит `ugar volume close N`."""
     from . import snapshot as snapshot_mod
 
     ws, cfg, lib = _ctx()
-    exporter.run_export(lib, ws.exports, ws.logs)
+    volume = _opt(volume, None) or ws.volume
+    if volume != ws.volume:
+        _fail(f"выгрузки — тома {ws.volume}; для среза тома {volume} переключитесь: `ugar volume open {volume}`.")
+    exporter.run_export(lib, ws.exports, ws.logs, ws.volume)
     path = snapshot_mod.build_snapshot(ws, volume)
     typer.secho(f"Срез тома {volume}: {path}", fg=typer.colors.GREEN)
     typer.echo("Внесите его в библиотеку правкой канона и `ugar canon-commit` (FR-K3 соблюдён).")
+
+
+volume_app = typer.Typer(
+    help="Тома (аудит 2, п. 27): сводка тома, закрытие тома (снапшот 3.5, тег, рукопись, статистика), переключение текущего тома.",
+    no_args_is_help=True,
+)
+app.add_typer(volume_app, name="volume", rich_help_panel="Канон и бэкап")
+
+
+@volume_app.command("status")
+@_friendly
+def cmd_volume_status(
+    volume: int | None = typer.Argument(None, help="Номер тома (по умолчанию — текущий)."),
+) -> None:
+    """Сводка тома: главы по состояниям, слова принятых глав, метрики Э1 по актам, стоимость по logs/api.jsonl."""
+    ws, cfg, lib = _ctx()
+    volume = _opt(volume, None) or ws.volume
+    if volume == ws.volume:
+        try:
+            exporter.run_export(lib, ws.exports, ws.logs, ws.volume)
+        except MarkupError as e:
+            typer.secho(f"⚠ выгрузки не пересобраны: {e}", fg=typer.colors.YELLOW)
+    stats = volume_mod.volume_stats(ws, lib, volume)
+    typer.secho(f"Том {volume}" + (" (текущий)" if volume == ws.volume else ""), bold=True)
+    typer.echo(f"Главы в {ws.chapters_root(volume).relative_to(ws.root).as_posix()}/; глав в поглавнике: {stats.chapters_total}")
+    typer.echo(f"Зафиксировано: {len(stats.fixed)}" + (f" ({', '.join(map(str, stats.fixed))})" if stats.fixed else ""))
+    typer.echo(f"В работе: {len(stats.in_work)}" + (" — " + "; ".join(f"гл. {n}: {st}" for n, st in stats.in_work.items()) if stats.in_work else ""))
+    typer.echo(f"Слов в принятых главах: {stats.words_total}")
+    if stats.total_metrics:
+        typer.echo("Метрики Э1 (средние): " + "; ".join(f"{k}: {v:g}" for k, v in stats.total_metrics.items()))
+    for a in stats.acts:
+        m = stats.act_metrics.get(a.act)
+        if m:
+            typer.echo(f"  акт {a.act} «{a.title}» (гл. {a.from_chapter}–{a.to_chapter}): " + "; ".join(f"{k}: {v:g}" for k, v in m.items()))
+    typer.echo(f"Вызовов моделей: {stats.calls}; оценка стоимости: ${stats.cost:.2f}")
+    if stats.missing_docs:
+        typer.secho("В библиотеке нет документов тома: " + "; ".join(stats.missing_docs), fg=typer.colors.YELLOW)
+
+
+@volume_app.command("close")
+@_friendly
+def cmd_volume_close(
+    volume: int | None = typer.Argument(None, help="Номер тома (по умолчанию — текущий)."),
+    again: bool = typer.Option(False, "--заново", "--again", help="Переписать уже существующий снапшот 35_Снапшот_ТомN.md и тег."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Подтверждение без вопросов (снапшот в канон; переключение тома — только явным ответом)."),
+    next_volume: bool | None = typer.Option(None, "--следующий/--без-переключения", help="Переключить config.volume на N+1 без вопроса / не переключать."),
+) -> None:
+    """Закрыть том: все главы «зафиксировано» → снапшот 3.5 в библиотеку (35_Снапшот_ТомN.md, коммит) →
+    тег `том-N` → рукопись manuscript/ТомN.md (+ .docx при python-docx) → статистика → переход к тому N+1."""
+    ws, cfg, lib = _ctx()
+    volume = _opt(volume, None) or ws.volume
+    again = _opt(again, False)
+    yes = _opt(yes, False)
+    next_volume = _opt(next_volume, None)
+    pending = volume_mod.unfixed_chapters(ws, volume) if volume == ws.volume else []
+    if pending:
+        _fail(f"том {volume} нельзя закрыть: не зафиксированы {', '.join(pending)}.")
+    if not yes and not typer.confirm(
+        f"Закрыть том {volume}: внести снапшот 3.5 в библиотеку и закоммитить, поставить тег том-{volume}, собрать рукопись? (Д-8)"
+    ):
+        raise typer.Abort()
+    res = volume_mod.close_volume(ws, cfg, lib, volume, again=again, author_confirmed=True)
+    typer.secho(f"Том {volume} закрыт.", fg=typer.colors.GREEN)
+    typer.echo(f"  снапшот 3.5: {res.snapshot_doc.name} — {'; '.join(res.messages)}")
+    typer.echo(f"  тег: {res.tag or '—'}")
+    typer.echo(f"  рукопись: {res.manuscript_md.relative_to(ws.root).as_posix()}"
+               + (f", {res.manuscript_docx.relative_to(ws.root).as_posix()}" if res.manuscript_docx else ""))
+    if res.docx_hint:
+        typer.secho(f"  {res.docx_hint}", fg=typer.colors.YELLOW)
+    typer.echo(f"  статистика: {res.stats_path.relative_to(ws.root).as_posix()}")
+    nxt = volume + 1
+    missing = volume_mod.open_volume(ws, lib, nxt)
+    if missing:
+        typer.secho(
+            f"Том {nxt} не открыт: в библиотеке нет его документов — заведите " + "; ".join(missing)
+            + f", затем `ugar volume open {nxt}`.", fg=typer.colors.YELLOW,
+        )
+        return
+    if next_volume is None:
+        next_volume = typer.confirm(f"Переключить рабочую область на том {nxt} (config.yaml: volume)?", default=False)
+    if next_volume:
+        set_volume(ws, nxt)
+        exporter.run_export(lib, ws.exports, ws.logs, nxt)
+        typer.secho(f"Текущий том: {nxt} (главы — {ws.chapters_root(nxt).relative_to(ws.root).as_posix()}/, выгрузки пересобраны).",
+                    fg=typer.colors.GREEN)
+    else:
+        typer.echo(f"Текущий том остался {ws.volume}; переключить позже — `ugar volume open {nxt}`.")
+
+
+@volume_app.command("open")
+@_friendly
+def cmd_volume_open(volume: int = typer.Argument(..., help="Номер тома, над которым идёт работа.")) -> None:
+    """Переключить текущий том рабочей области (config.yaml: volume) — с проверкой, что документы тома есть."""
+    ws, cfg, lib = _ctx()
+    missing = volume_mod.open_volume(ws, lib, volume)
+    if missing:
+        _fail(f"в библиотеке нет документов тома {volume} — заведите: " + "; ".join(missing))
+    if volume == ws.volume:
+        typer.echo(f"Том {volume} уже текущий.")
+        return
+    set_volume(ws, volume)
+    try:
+        exporter.run_export(lib, ws.exports, ws.logs, volume)
+    except MarkupError as e:
+        _fail(f"том {volume} переключён, но выгрузки не собрались: {e}")
+    typer.secho(f"Текущий том: {volume}. Главы — {ws.chapters_root(volume).relative_to(ws.root).as_posix()}/; выгрузки пересобраны.",
+                fg=typer.colors.GREEN)
 
 
 @app.command("doctor", rich_help_panel="Обзор")
@@ -1225,7 +1347,7 @@ def cmd_rollback(
         )
         st._save()
         try:
-            exporter.run_export(lib, ws.exports, ws.logs)
+            exporter.run_export(lib, ws.exports, ws.logs, ws.volume)
         except MarkupError as e:
             typer.secho(f"⚠ Откат выполнен, но выгрузки не пересчитаны: {e}. Поправьте канон и `ugar export`.", fg=typer.colors.YELLOW)
         if to != "принято":
@@ -1383,7 +1505,7 @@ def cmd_retest(
         )
         typer.secho(f"Черновик записи журнала: retest/{stamp}/журнал_запись.md — внесите в 3.6 (сценарий Б).", fg=typer.colors.GREEN)
         return
-    exporter.run_export(lib, ws.exports, ws.logs)
+    exporter.run_export(lib, ws.exports, ws.logs, ws.volume)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     dest = ws.root / "retest" / stamp
     # 2.10: окно собирается во временную рабочую область — window.md главы в работе не трогается

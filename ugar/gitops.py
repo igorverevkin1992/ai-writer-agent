@@ -163,6 +163,11 @@ def tag(repo: Path, name: str, sha: str) -> str:
     return name
 
 
+def delete_tag(repo: Path, name: str) -> None:
+    """Снять тег (перестановка `том-N` при `ugar volume close N --заново`)."""
+    _git(repo, "tag", "-d", name, check=False)
+
+
 def tag_chapter(repo: Path, chapter: int, sha: str) -> str | None:
     """Тег приёмки главы: `глава-N`; повторная приёмка после отката — `глава-N-2`, `-3`…
     Идемпотентно: если на этот коммит тег главы уже стоит, возвращает его. Любой сбой git

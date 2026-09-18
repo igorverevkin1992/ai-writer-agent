@@ -309,10 +309,7 @@ class PanelAPI:
         author_today = 0.0
         # Одна повреждённая глава (пустой status.yaml, битый verdict.json) — карточка «повреждено»
         # с причиной, а не 500 для всей панели (4.8).
-        for d in sorted(self.ws.chapters.iterdir()) if self.ws.chapters.exists() else []:
-            if not (d.is_dir() and d.name.isdigit()):
-                continue
-            n = int(d.name)
+        for n, d in self.ws.chapter_dirs():  # главы текущего тома (`config.volume`)
             key = tuple(self._stat_key(d / name) for name in self._CHAPTER_FILES)
             with self._cache_lock:
                 cached = self._chapter_cache.get(n)
@@ -384,6 +381,7 @@ class PanelAPI:
         uncommitted = self.canon_status()
         return {
             "workspace": str(self.ws.root),
+            "volume": self.ws.volume,
             "chapters": chapters,
             "briefs": briefs,
             "regression_green": self._regression_green(),
@@ -689,7 +687,7 @@ class PanelAPI:
                             self.lint_running = True
                             self.lint_pending = False
                         try:
-                            report = lint_mod.run_lint(self.library, self.ws.exports, self.ws.logs)
+                            report = lint_mod.run_lint(self.library, self.ws.exports, self.ws.logs, volume=self.ws.volume)
                         except Exception as e:  # noqa: BLE001 — сбой виден как находка
                             report = lint_mod.error_report(e, self.ws.logs)
                         finally:

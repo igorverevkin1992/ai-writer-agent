@@ -24,7 +24,12 @@ from .schemas import Act, CircleStep, StoryCircle
 SCOPES = ("книга", "акты", "главы", "всё")
 SCOPE_ALIASES = {"части": "акты", "часть": "акт"}
 STEP_NAMES = ["Ты", "Потребность", "Переход", "Поиск", "Обретение", "Расплата", "Возвращение", "Изменение"]
-CANON_DOC = "21_Круги_истории_Том1.md"
+CANON_DOC = "21_Круги_истории_Том1.md"  # документ 2.1 тома 1 (совместимость); по тому — canon_doc_name()
+
+
+def canon_doc_name(volume: int = 1) -> str:
+    """Имя документа 2.1 тома: `21_Круги_истории_Том{N}.md` (аудит 2, п. 27)."""
+    return f"21_Круги_истории_Том{int(volume)}.md"
 _ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
 
 
@@ -318,11 +323,11 @@ def list_circles(ws: Workspace) -> list[dict]:
 # ------------------------------------------------------------ канон (2.1)
 
 
-def render_canon_doc(circles: list[StoryCircle], acts: list[Act]) -> str:
+def render_canon_doc(circles: list[StoryCircle], acts: list[Act], volume: int = 1) -> str:
     """Документ 2.1 из актов и кругов — в разметке, которую читает exporter (Д-1)."""
     order = {"книга": 0, "акт": 1, "глава": 2}
     lines = [
-        "# 2.1. Круги истории — Том 1",
+        f"# 2.1. Круги истории — Том {volume}",
         "## Версия 1.0 · Р-020, Р-021. Несущий каркас драматургии: том → четыре акта → главы",
         "",
         "Документ генерируется конвейером из черновиков `круги_истории/` по подтверждению автора "
@@ -389,8 +394,8 @@ def commit_to_canon(ws: Workspace, cfg: Config, library: Path) -> tuple[Path, st
     for c in new:
         merged[(c.scope, c.key)] = c
     acts = act_list(ws)
-    path = library / CANON_DOC
-    text = render_canon_doc(list(merged.values()), acts)
+    path = library / canon_doc_name(ws.volume)
+    text = render_canon_doc(list(merged.values()), acts, ws.volume)
     message = f"[круги истории] внесено кругов: {len(new)} (каркас драматургии, Р-020)"
     # единый конвейер: чистый git → сессия записи → выгрузки → линт → коммит (или «не под git»)
     result = canonchange.canon_change(

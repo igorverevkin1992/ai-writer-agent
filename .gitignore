@@ -61,6 +61,7 @@ panel/node_modules/
 
 # черновики рабочей области конвейера (в корне репозитория)
 /snapshots/
+/manuscript/
 /круги_истории/
 /retest/
 .coverage

@@ -304,16 +304,16 @@ def check_chapter_refs(matrix: list[MatrixFact], plants, continuity, briefs: lis
     out: list[LintFinding] = []
     if not briefs:
         return out
-    hi = max(b.chapter for b in briefs)
     volume = briefs[0].volume
-    mpath = next(iter(sorted(library.glob("31_*.md"))), None)
+    hi = max(b.chapter for b in briefs if b.volume == volume)
+    mpath = next(iter(exporter.volume_docs(library, "31_*.md", volume)), None)
     for f in matrix:
         if f.from_chapter is not None and f.from_chapter > hi:
             out.append(LintFinding(
                 code="МАТР-1", severity="ошибка", file=_rel_or("", mpath), line=_find_line(mpath, f.fact[:30]) if mpath else None,
                 message=f"{f.fact_id} ({f.subject}): узнаёт в гл. {f.from_chapter}, а в томе {hi} глав",
             ))
-    reg = next(iter(sorted(library.glob("*Реестр_информационного_режима*.md"))), None) or next(iter(sorted(library.glob("32_*.md"))), None)
+    reg = exporter._registry(library, volume) or next(iter(exporter.volume_docs(library, "32_*.md", volume)), None)
     for p in plants:
         for ch in p.chapters:
             if ch > hi:
@@ -328,7 +328,7 @@ def check_chapter_refs(matrix: list[MatrixFact], plants, continuity, briefs: lis
                     code="ЗАКЛ-2", severity="ошибка", file=_rel_or("", reg), line=_find_line(reg, p.what[:30]) if reg else None,
                     message=f"{p.plant_id}: «стреляет» в гл. {fire['ch']} раньше, чем положена (гл. {placed_ch})",
                 ))
-    cpath = next(iter(sorted(library.glob("33_*.md"))), None)
+    cpath = next(iter(exporter.volume_docs(library, "33_*.md", volume)), None)
     for c in continuity:
         for ch in re.findall(r"\d+", c.chapters or ""):
             if int(ch) > hi:
@@ -471,7 +471,7 @@ def check_scene_persons(briefs: list[Brief], dossier_names: set[str], known_name
 
 def check_circles(circles, acts, briefs: list[Brief], library: Path) -> list[LintFinding]:
     out: list[LintFinding] = []
-    path = next(iter(sorted(library.glob("21_*.md"))), None)
+    path = next(iter(exporter.volume_docs(library, "21_*.md", briefs[0].volume if briefs else 1)), None)
     if not circles or not briefs:
         return out
     lo, hi = min(b.chapter for b in briefs), max(b.chapter for b in briefs)
@@ -569,13 +569,14 @@ def check_prose(library: Path, briefs: list[Brief], infobans: list[InfoBan], sto
 # ------------------------------------------------------------------ прогон
 
 
-def run_lint(library: Path, exports_dir: Path, logs_dir: Path, export: bool = True) -> LintReport:
-    """Машинный слой: экспорт (валидация Д-1) + все проверки. Ничего не пишет в библиотеку.
-    `export=False` — выгрузки уже актуальны (вызывающий только что сделал экспорт): без второго прогона."""
+def run_lint(library: Path, exports_dir: Path, logs_dir: Path, export: bool = True, volume: int = 1) -> LintReport:
+    """Машинный слой: экспорт (валидация Д-1) + все проверки ТОМА `volume` (текущий том рабочей области).
+    Ничего не пишет в библиотеку. `export=False` — выгрузки уже актуальны (вызывающий только что сделал
+    экспорт того же тома): без второго прогона."""
     findings: list[LintFinding] = []
     try:
         if export:
-            exporter.run_export(library, exports_dir, logs_dir)
+            exporter.run_export(library, exports_dir, logs_dir, volume)
     except MarkupError as e:
         rel = _rel(library, Path(e.path)) if getattr(e, "path", None) else ""
         findings.append(LintFinding(code="РАЗМ-1", severity="ошибка", file=rel, line=getattr(e, "line", None),
@@ -592,23 +593,23 @@ def run_lint(library: Path, exports_dir: Path, logs_dir: Path, export: bool = Tr
     acts = exporter.load_acts(exports_dir)
     circles = exporter.load_circles(exports_dir)
     known = exporter._known_names(library)
-    reg = exporter._registry(library)
+    volume = briefs[0].volume if briefs else volume  # выгрузки — одного тома (run_export(volume=…))
+    reg = exporter._registry(library, volume)
     if reg is None:
-        reg = next(iter(sorted(library.glob("23_*.md"))), None)
-    acts_path = next(iter(sorted(library.glob("21_*.md"))), None)
+        reg = next(iter(exporter.volume_docs(library, "23_*.md", volume)), None)
+    acts_path = next(iter(exporter.volume_docs(library, "21_*.md", volume)), None)
     year = briefs[0].year if briefs else None
-    volume = briefs[0].volume if briefs else 1
     focal_vols = parse_focal_volumes(sorted((library / "Досье").glob("*.md")) if (library / "Досье").exists() else [], known)
 
     findings += check_chronology(briefs, reg)
     findings += check_ranges(parts, acts, briefs, reg, acts_path)
     findings += check_focals(briefs, focal_vols, library, {d.name for d in dossiers}, reg)
     findings += check_brief_epistemics(briefs, infobans, reg)
-    findings += check_secrets_vs_matrix(infobans, matrix, exporter._registry(library))
+    findings += check_secrets_vs_matrix(infobans, matrix, exporter._registry(library, volume))
     findings += check_chapter_refs(matrix, plants, continuity, briefs, library)
     findings += check_dossiers(library, known, year, volume)
-    findings += check_scene_persons(briefs, {d.name for d in dossiers}, known, exporter._registry(library),
-                                    next(iter(sorted(library.glob("23_*.md"))), None))
+    findings += check_scene_persons(briefs, {d.name for d in dossiers}, known, exporter._registry(library, volume),
+                                    next(iter(exporter.volume_docs(library, "23_*.md", volume)), None))
     findings += check_circles(circles, acts, briefs, library)
     findings += check_prose(library, briefs, infobans, stoplists)
     findings += check_accepted_prose(library, exports_dir, briefs)

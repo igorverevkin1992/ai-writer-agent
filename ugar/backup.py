@@ -22,7 +22,7 @@ from .config import Config
 from .paths import Workspace
 
 # что входит в архив рабочей области: черновики, правки автора, флаги, журнал API, круги, снапшоты, корпус, конфиг
-ARCHIVE_ITEMS = ("chapters", "logs", "круги_истории", "snapshots", "regression", "config.yaml")
+ARCHIVE_ITEMS = ("chapters", "logs", "круги_истории", "snapshots", "manuscript", "regression", "config.yaml")
 ARCHIVE_PREFIX = "УГАР_рабочая_область_"
 DEFAULT_ARCHIVE_DIR = "../УГАР_бэкап"
 DEFAULT_SPLIT_TARGET = "../УГАР_Библиотека"
@@ -217,12 +217,10 @@ def _rel_for_config(target: Path, root: Path) -> str:
 
 def _fixed_chapters(ws: Workspace) -> list[int]:
     out = []
-    for status in sorted(ws.chapters.glob("*/status.yaml")) if ws.chapters.exists() else []:
-        if "коммит_приёмки" in status.read_text(encoding="utf-8"):
-            try:
-                out.append(int(status.parent.name))
-            except ValueError:
-                continue
+    for n, d in ws.chapter_dirs():  # главы текущего тома
+        status = d / "status.yaml"
+        if status.exists() and "коммит_приёмки" in status.read_text(encoding="utf-8"):
+            out.append(n)
     return out
 
 

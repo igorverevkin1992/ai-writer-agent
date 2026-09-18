@@ -93,7 +93,7 @@ def _rollback(library: Path, ws: Workspace, error: BaseException) -> None:
             f"Восстановите вручную: git -C «{library}» checkout -- . && git clean -fd -- ."
         ) from error
     try:
-        exporter.run_export(library, ws.exports, ws.logs)
+        exporter.run_export(library, ws.exports, ws.logs, ws.volume)
     except Exception:  # noqa: BLE001 — выгрузки пересчитает `ugar export`; важнее показать исходную ошибку
         pass
 
@@ -130,13 +130,13 @@ def canon_change(
     try:
         with guard.canon_write_session():
             writer()
-        hashes = exporter.run_export(library, ws.exports, ws.logs)  # разбирает ВСЁ до записи выгрузок
+        hashes = exporter.run_export(library, ws.exports, ws.logs, ws.volume)  # разбирает ВСЁ до записи выгрузок
     except BaseException as e:
         if repo and clean_at_entry:
             _rollback(library, ws, e)
         raise
     try:
-        report = lint.run_lint(library, ws.exports, ws.logs, export=False)  # выгрузки только что пересобраны
+        report = lint.run_lint(library, ws.exports, ws.logs, export=False, volume=ws.volume)  # выгрузки только что пересобраны
     except Exception as e:  # noqa: BLE001 — сбой проверки не должен потерять уже записанное изменение
         report = lint.error_report(e, ws.logs)
     result = ChangeResult(export_hashes=hashes, lint=report)

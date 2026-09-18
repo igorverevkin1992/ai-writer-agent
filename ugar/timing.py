@@ -115,12 +115,9 @@ def today_author_minutes(ws, today=None) -> float:
 
     today = today or datetime.now().astimezone().date()
     total = 0.0
-    dirs = sorted(ws.chapters.iterdir()) if ws.chapters.exists() else []
-    for d in dirs:
-        if not (d.is_dir() and d.name.isdigit()):
-            continue
+    for n, _ in ws.chapter_dirs():  # главы текущего тома
         try:
-            st = ChapterState(ws, int(d.name))
+            st = ChapterState(ws, n)
         except StatusFileError:
             continue  # одна повреждённая глава не ломает сводку
         for kind, secs, end in intervals(st.data.get("история", [])):
