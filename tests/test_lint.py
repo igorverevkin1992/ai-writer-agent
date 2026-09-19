@@ -114,8 +114,8 @@ def test_реальная_библиотека_без_ошибок():
     report = lint.run_lint(LIBRARY, ws.exports, ws.logs)
     assert report.errors == 0, [f.message for f in report.findings if f.severity == "ошибка"]
     codes = {f.code for f in report.findings}
-    # известное расхождение реестра и матрицы по Т-07 подсвечено — это работа линтера, не шум
-    assert "ТАЙНА-1" in codes
+    # расхождение реестра и матрицы по Т-07 снято автором (Р-033): на чистом каноне ТАЙНА-1 нет
+    assert "ТАЙНА-1" not in codes
     # возраст «гл. 41 т.1» больше не принимается за возраст (ложных ДОСЬЕ-1 нет)
     assert not any(f.code == "ДОСЬЕ-1" and "41" in f.message for f in report.findings)
     # участники сцен без карточки досье и карточки без «Физики» — заметки для автора (аудит 7.6, 3.10)

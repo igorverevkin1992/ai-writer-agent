@@ -31,6 +31,9 @@ from .schemas import Act, Brief, InfoBan, LintFinding, MatrixFact, Plant
 
 # ячейка «Читатель» матрицы/реестра, где раскрытие — расчёт читателя, а не показ через фокала
 DEDUCTION_RE = re.compile(r"разгадк|улик|расчётн", re.IGNORECASE)
+# «/ по своим каналам», «/ за кадром» — знание, полученное вне показанных сцен (Р-033): присутствие
+# субъекта в главе не проверяется
+OFFSTAGE_RE = re.compile(r"по своим каналам|за кадром", re.IGNORECASE)
 # «Гл. 29 или 40» — открытое решение автора, а не две главы
 PLANT_OR_RE = re.compile(r"\d\s*(?:,\s*\d+\s*)*или\s*\d")
 # «Пропорция фокалов: Лемм 4 гл. / Степан 3 / Штерн 2»
@@ -94,8 +97,9 @@ def _matrix_reader_cells(path: Path | None) -> dict[str, str]:
 def check_matrix_presence(matrix: list[MatrixFact], briefs: list[Brief], doc: _Doc) -> list[LintFinding]:
     """МАТР-2: субъект узнаёт факт в главе, где его нет ни фокалом, ни участником.
 
-    Исключение — субъект узнаёт вместе с фокалом главы (общая сцена: фокал получает тот же факт
-    в той же главе). Для фокальных линий это ошибка конструкции, для второстепенных персонажей
+    Исключения — субъект узнаёт вместе с фокалом главы (общая сцена: фокал получает тот же факт
+    в той же главе) и знание «за кадром» (источник «/ по своим каналам», «/ за кадром» — Р-033).
+    Для фокальных линий это ошибка конструкции, для второстепенных персонажей
     (их присутствие сетка называет не всегда) — предупреждение."""
     out: list[LintFinding] = []
     by_ch = {b.chapter: b for b in briefs}
@@ -104,7 +108,7 @@ def check_matrix_presence(matrix: list[MatrixFact], briefs: list[Brief], doc: _D
     for f in matrix:
         by_fact.setdefault(f.fact_id, []).append(f)
     for f in matrix:
-        if f.subject == "Читатель" or not f.from_chapter:
+        if f.subject == "Читатель" or not f.from_chapter or OFFSTAGE_RE.search(f.source):
             continue
         b = by_ch.get(f.from_chapter)
         if b is None:

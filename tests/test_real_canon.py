@@ -72,7 +72,7 @@ def test_матрица_закладки_тайны_досье(real):
     zola = next(p for p in plants if "золе" in p.what)
     assert zola.chapters == [6] and {"vol": 6} in zola.fires
     ch4 = {p.what.split(" (")[0] for p in plants if 4 in p.chapters}
-    assert ch4 == {"часы", "почтовый канал"}                 # из «Закладки положены» поглавника
+    assert ch4 == {"Часы Штерна", "Почтовый канал Штерна"}  # §7 реестра (Р-033), сходится со сквозным контролем
     assert not any("картотека" in p.what and p.plant_id.startswith("П-") for p in plants)  # дедуп с §7
 
     bans = exporter.load_infobans(real.exports)

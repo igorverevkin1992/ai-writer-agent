@@ -69,14 +69,16 @@ def test_не_упоминается_в_томе_становится_запре
 @real_only
 def test_реестр_закладки_все_главы_и_окна_27_40(real):
     by_id = {p.plant_id: p for p in exporter.load_plants(real.exports)}
-    assert by_id["З-02"].chapters == [29, 40] and [f["vol"] for f in by_id["З-02"].fires] == [2, 3, 4, 5, 10]
+    assert by_id["З-02"].chapters == [29] and [f["vol"] for f in by_id["З-02"].fires] == [2, 3, 4, 5, 10]
     assert by_id["З-03"].chapters == [9, 27]
     assert by_id["З-08"].chapters == [34, 40]
     assert [f["vol"] for f in by_id["З-07"].fires] == [6]  # «в томе 1» — не выстрел
     w27 = compiler.compile_window(real, LIBRARY, 27)[0].read_text(encoding="utf-8")
     w40 = compiler.compile_window(real, LIBRARY, 40)[0].read_text(encoding="utf-8")
     assert "[З-03] Картотека Лемма" in w27
-    assert "[З-08] «Третья рука»" in w40 and "[З-02]" in w40
+    assert "[З-08] «Третья рука»" in w40 and "[З-02]" not in w40  # З-02 — только гл. 29 (Р-028)
+    w29 = compiler.compile_window(real, LIBRARY, 29)[0].read_text(encoding="utf-8")
+    assert "[З-02]" in w29
     # 1.5: Красный Крест / Ватикан — «НЕ упоминать» в каждом окне тома
     assert "НЕ упоминать (информрежим З-07): Красный Крест / Ватикан" in w27
 
