@@ -16,7 +16,7 @@ real_only = pytest.mark.skipif(not LIBRARY.exists(), reason="реальная б
 
 @pytest.fixture
 def real(tmp_path):
-    (tmp_path / "config.yaml").write_text(f'library_dir: "{LIBRARY}"\n', encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(f'library_dir: "{LIBRARY.as_posix()}"\n', encoding="utf-8")
     ws = Workspace(tmp_path)
     guard.set_library_dir(LIBRARY)
     exporter.run_export(LIBRARY, ws.exports, ws.logs)

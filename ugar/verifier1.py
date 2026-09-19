@@ -138,7 +138,7 @@ def corpus_scope(corpus_dir: Path, volume: int, part_range: tuple[int, int] | No
     """Файлы корпуса для TTR-окна (аудит 3.7): том брифа и, если известна часть, её главы;
     файлы без номера тома/главы в имени не отсеиваются."""
     files: list[Path] = []
-    for f in sorted(corpus_dir.glob("*.txt")):
+    for f in sorted(corpus_dir.glob("*.txt"), key=lambda p: p.name):  # по имени: на Windows Path сравнивается без регистра
         m = _CORPUS_STEM_RE.search(f.stem)
         if m is not None:
             vol, ch = int(m.group(1)), int(m.group(2))

@@ -890,7 +890,10 @@ def _sanitize(message: str, api: PanelAPI) -> str:
     библиотеки не превратился в «рабочая область/УГАР_Библиотека»."""
     pairs: list[tuple[str, str]] = []
     for root, word in ((api.library, "библиотека"), (api.ws.root, "рабочая область")):
-        for variant in {str(root), str(root.resolve()), root.as_posix(), root.resolve().as_posix()}:
+        forms = {str(root), str(root.resolve()), root.as_posix(), root.resolve().as_posix()}
+        # Windows: в тексте исключения путь бывает в виде repr — с удвоенными «\\»
+        forms |= {v.replace("\\", "\\\\") for v in forms if "\\" in v}
+        for variant in forms:
             if variant and variant not in ("/", "."):
                 pairs.append((variant, word))
     for variant, word in sorted(pairs, key=lambda p: -len(p[0])):
