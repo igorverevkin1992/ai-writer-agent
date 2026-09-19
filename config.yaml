@@ -12,7 +12,7 @@ backup_keep: 10
 # Модели — пины автора (Р-016, Д-11); цены по прайс-листам на 03.09.2026, обновляйте при смене тарифов.
 writer:
   provider: gemini
-  model: gemini-3.1-pro
+  model: gemini-3.1-pro-preview
   params:
     # Уровень размышлений Писателя (Д-6: параметр пинуется явно, смета ЭКОНОМИКА.md §6 — по нему).
     # Форма — как принимает google-genai (проверено на SDK 2.24.0: types.GenerateContentConfig.thinking_config
