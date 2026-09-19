@@ -229,7 +229,7 @@ def test_guard_действует_во_всех_потоках(ws, library):
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-c", "core.quotepath=off", "-C", str(repo), *args],
-                          capture_output=True, text=True, check=True).stdout.strip()
+                          capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
 
 
 def _init_repo(root: Path) -> None:

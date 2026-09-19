@@ -94,7 +94,7 @@ def test_canon_commit_предупреждение_о_нормах(ws, library, 
     assert r.exit_code == 0, r.output
     assert "Р-№" in r.output  # предупреждение: нормы изменены без ссылки на журнал
     log = subprocess.run(["git", "-C", str(library), "log", "-1", "--format=%s"],
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, encoding="utf-8").stdout
     assert "ослабил норму был" in log
 
     # со ссылкой Р-№ предупреждения нет

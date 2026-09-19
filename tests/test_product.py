@@ -145,7 +145,7 @@ def test_backup_push(ws, library, monkeypatch, tmp_path):
     r = runner.invoke(app, ["backup", "--push", "-y"])
     assert r.exit_code == 0, r.output
     assert "✓ резерв" in r.output
-    log = subprocess.run(["git", "-C", str(bare), "log", "--oneline"], capture_output=True, text=True).stdout
+    log = subprocess.run(["git", "-C", str(bare), "log", "--oneline"], capture_output=True, text=True, encoding="utf-8").stdout
     assert "старт" in log
 
 

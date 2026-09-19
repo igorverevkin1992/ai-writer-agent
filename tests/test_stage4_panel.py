@@ -268,7 +268,10 @@ def test_статика_за_симлинком(monkeypatch, tmp_path):
     """4.6/5.7: ugar/data за симлинком — resolve() корня, иначе 403 на всё."""
     real = server._static_root()
     link = tmp_path / "линк"
-    link.symlink_to(real, target_is_directory=True)
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError as e:  # Windows без режима разработчика: симлинки требуют прав (WinError 1314)
+        pytest.skip(f"симлинки недоступны: {e}")
     monkeypatch.setattr(server, "_static_root", lambda: link.resolve())
     assert server._static_root() == real  # оба resolve'нуты → parents совпадают
 

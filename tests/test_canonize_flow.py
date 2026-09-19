@@ -100,7 +100,7 @@ def test_полный_такт_с_коммитом(ws, library):
     # атомарный коммит с шаблонным сообщением (FR-K2)
     assert commit != head_before
     log = subprocess.run(
-        ["git", "-C", str(library), "log", "-1", "--format=%s"], capture_output=True, text=True
+        ["git", "-C", str(library), "log", "-1", "--format=%s"], capture_output=True, text=True, encoding="utf-8"
     ).stdout
     assert "[глава 1]" in log and "приёмка" in log
     assert not gitops.dirty(library)
