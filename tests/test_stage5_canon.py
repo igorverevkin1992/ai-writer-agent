@@ -15,7 +15,7 @@ from ugar.mdparse import MarkupError
 
 
 def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, encoding="utf-8").stdout.strip()
 
 
 def _init_repo(root: Path) -> None:

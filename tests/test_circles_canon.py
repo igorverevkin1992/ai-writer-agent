@@ -103,7 +103,7 @@ def test_внесение_в_канон(ws, library, monkeypatch):
     canon = exporter.load_circles(ws.exports)
     assert [(c.scope, c.key) for c in canon] == [("книга", None), ("глава", 1)]
     assert circles.canon_status(ws) == {"книга": "в каноне", "глава_01": "в каноне"}
-    log = subprocess.run(["git", "-C", str(library), "log", "-1", "--format=%s"], capture_output=True, text=True).stdout
+    log = subprocess.run(["git", "-C", str(library), "log", "-1", "--format=%s"], capture_output=True, text=True, encoding="utf-8").stdout
     assert "круги истории" in log and "Р-020" in log
 
     # правка черновика → «отличается от канона»; повторное внесение заменяет только его, книга остаётся
