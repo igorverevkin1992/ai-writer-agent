@@ -11,7 +11,9 @@
 - `ДОСЬЕ-4` — статус досье («гибнет т.N») против хронологии 12 («Гибель …»);
 - `ДОСЬЕ-5` — возраст в абсолютном году или в томе, отличном от текущего (расширение `ДОСЬЕ-1`);
 - `КАНОН-1` — вопросы к решениям автора (заметки): где открывается фокал, объём тома, ссылки на
-  события 12, индекс библиотеки против журнала решений.
+  события 12, индекс библиотеки против журнала решений;
+- `АРКА-1` / `АРКА-2` — таблица арок 2.5 (Р-025): персонаж без карточки досье / акт вне таблицы актов 2.1
+  (заметки; на скелете и без документа — тишина).
 
 Модуль ничего не пишет: он только возвращает находки, которые собирает `lint.run_lint`.
 Пороги и словари, относящиеся к прозе, сюда не переносятся — они остаются в каноне и в выгрузках.
@@ -609,6 +611,30 @@ def check_canon_questions(library: Path, briefs: list[Brief], chronology, norms,
 # ------------------------------------------------------------------ прогон
 
 
+def check_arcs(arcs, acts, dossier_names: set[str], arcs_path: Path | None, docs: _Docs) -> list[LintFinding]:
+    """АРКА-1: персонаж таблицы арок 2.5 без карточки досье 1.3; АРКА-2: акт строки вне таблицы актов 2.1.
+    Обе — заметки автору; содержание ячеек не проверяется (скелет «⚠ заполнить» — норма)."""
+    out: list[LintFinding] = []
+    if not arcs:
+        return out
+    act_numbers = {a.act for a in acts}
+    seen: set[tuple[str, str]] = set()
+    for arc in arcs:
+        if dossier_names and arc.character not in dossier_names and ("АРКА-1", arc.character) not in seen:
+            seen.add(("АРКА-1", arc.character))
+            out.append(LintFinding(
+                code="АРКА-1", severity="заметка", file=docs.rel(arcs_path), line=docs.find(arcs_path, f"| {arc.character} |"),
+                message=f"арки 2.5: персонаж «{arc.character}» без карточки досье 1.3 — опечатка в имени или нужна карточка",
+            ))
+        if act_numbers and arc.act not in act_numbers and ("АРКА-2", str(arc.act)) not in seen:
+            seen.add(("АРКА-2", str(arc.act)))
+            out.append(LintFinding(
+                code="АРКА-2", severity="заметка", file=docs.rel(arcs_path), line=docs.find(arcs_path, f"| {arc.character} | {arc.act} |"),
+                message=f"арки 2.5: акт {arc.act} («{arc.character}») вне таблицы актов 2.1 ({', '.join(str(n) for n in sorted(act_numbers))})",
+            ))
+    return out
+
+
 def run_checks(library: Path, exports_dir: Path, briefs: list[Brief], parts: list[dict],
                continuity: list[ContinuityEvent], known_names: set[str], reg_path: Path | None,
                volume: int) -> list[LintFinding]:
@@ -630,4 +656,7 @@ def run_checks(library: Path, exports_dir: Path, briefs: list[Brief], parts: lis
     findings += check_dossier_status(library, chronology, known_names, docs)
     findings += check_dossier_ages(library, chronology, volume, docs)
     findings += check_canon_questions(library, briefs, chronology, norms, known_names, reg_path, docs)
+    findings += check_arcs(exporter.load_arcs(exports_dir), exporter.load_acts(exports_dir),
+                           {d.name for d in exporter.load_dossiers(exports_dir)},
+                           next(iter(exporter.volume_docs(library, exporter.ARCS_DOC_GLOB, volume)), None), docs)
     return findings

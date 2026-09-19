@@ -32,6 +32,7 @@ from .schemas import (
     StopRule,
     StoryCircle,
     Act,
+    Arc,
 )
 
 # Обязательные идентификаторы норм (02 §5) — verifier-1 берёт пороги только отсюда.
@@ -59,7 +60,7 @@ TZ_DEFAULT_NORMS = {
 VOLUME_MARK_RE = re.compile(r"(?:Том|_Т)\s*0*(\d+)(?!\d)")
 # Документы, которые ведутся ПО ТОМАМ: для тома N ≥ 2 нужен файл с маркером тома, документы без
 # маркера принадлежат тому 1 (совместимость реальной библиотеки: `23_Поглавник_Часть_I.md`).
-PER_VOLUME_PATTERNS = ("23_*.md", "21_*.md", "31_*.md", "35_*.md", "*Реестр_информационного_режима*.md")
+PER_VOLUME_PATTERNS = ("23_*.md", "21_*.md", "22_*.md", "31_*.md", "35_*.md", "*Реестр_информационного_режима*.md")
 
 
 def doc_volume(path: Path) -> int | None:
@@ -541,6 +542,23 @@ def load_acts(exports_dir: Path) -> list[Act]:
     return [Act.model_validate(a) for a in load_export(exports_dir, "acts.json")]
 
 
+ARCS_DOC_GLOB = "22_Арки*.md"
+
+
+def export_arcs(library: Path, volume: int = 1) -> list[Arc]:
+    """Арки тома (2.5, Р-025) — таблица «персонаж × акт»; документа может не быть (деградация: пусто)."""
+    docs = volume_docs(library, ARCS_DOC_GLOB, volume)
+    return realcanon.parse_arcs(docs[0]) if docs else []
+
+
+def load_arcs(exports_dir: Path) -> list[Arc]:
+    """arcs.json; без выгрузки (старые exports/) — пустой список, как без документа."""
+    try:
+        return [Arc.model_validate(a) for a in load_export(exports_dir, "arcs.json")]
+    except FileNotFoundError:
+        return []
+
+
 def export_doses(library: Path, volume: int = 1) -> list[Dose]:
     """Дозы прошлого — §5 реестра информрежима «Три дозы 1913 года»; без реестра/раздела — пусто."""
     reg = _registry(library, volume)
@@ -631,7 +649,7 @@ def export_corpus(library: Path, exports_dir: Path) -> dict[str, str]:
 
 def run_export(library: Path, exports_dir: Path, logs_dir: Path, volume: int = 1) -> dict[str, str]:
     """Перегенерирует все выгрузки (FR-X1) ДЛЯ ТОМА `volume` (текущий том рабочей области, `ws.volume`):
-    потомные документы (поглавник/реестр, матрица 3.1, круги 2.1) берутся по тому через `volume_docs`,
+    потомные документы (поглавник/реестр, матрица 3.1, круги 2.1, арки 2.5) берутся по тому через `volume_docs`,
     документы других томов в выгрузки не попадают; общие документы серии (02–04, 12, 17, 33…) — как есть.
     Корпус (`corpus/`) — по всей `Проза/` (том в имени файла, `find_corpus_file`/`corpus_scope` фильтруют).
     Возвращает {файл: sha256}.
@@ -653,6 +671,7 @@ def run_export(library: Path, exports_dir: Path, logs_dir: Path, volume: int = 1
         "parts.json": export_parts(library, volume),
         "circles.json": export_circles(library, volume),
         "acts.json": export_acts(library, volume),
+        "arcs.json": export_arcs(library, volume),
         "doses.json": export_doses(library, volume),
         "documents.json": export_documents(library, volume),
         "chronicle.json": export_chronicle(library, volume),

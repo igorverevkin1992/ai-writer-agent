@@ -78,7 +78,7 @@ def circles(
         secho(f"Круги внесены в канон: {path}. Коммит: {commit}", fg=colors.GREEN)
         echo("Окна глав теперь содержат секцию «Драматургия»; пересоберите начатые главы (`ugar compile N`).")
         return None
-    result = circles_mod.run(ws, cfg, scope, chapter, only_missing=not redo)
+    result = circles_mod.run(ws, cfg, scope, chapter, only_missing=not redo, library=lib)
     for path in result["готово"]:
         secho(f"  ✓ {path}", fg=colors.GREEN)
     if result["ручной_режим"]:
