@@ -58,15 +58,17 @@ def marker_hit(text: str, markers: list[str]) -> str | None:
     return None
 
 
-_LINES_CACHE: dict[tuple[Path, int], list[str]] = {}
+_LINES_CACHE: dict[tuple[Path, int, int], list[str]] = {}
 
 
 def _lines_cache(path: Path) -> list[str]:
     """Строки документа: линтер обращается к одному файлу десятки раз (находки, _find_line).
-    Ключ включает время изменения — наблюдатель перепроверяет канон после правок, и устаревший
-    кэш давал бы находки по старому содержимому."""
+    Ключ включает время изменения и размер — наблюдатель перепроверяет канон после правок, и устаревший
+    кэш давал бы находки по старому содержимому (размер — страховка от грубого таймера Windows:
+    две записи подряд получают одно mtime)."""
     try:
-        key = (path, path.stat().st_mtime_ns)
+        st = path.stat()
+        key = (path, st.st_mtime_ns, st.st_size)
     except OSError:
         return []
     if key not in _LINES_CACHE:
