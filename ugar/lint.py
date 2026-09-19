@@ -476,9 +476,13 @@ def check_circles(circles, acts, briefs: list[Brief], library: Path) -> list[Lin
         return out
     lo, hi = min(b.chapter for b in briefs), max(b.chapter for b in briefs)
     for c in circles:
-        if len(c.steps) != 8:
+        # Р-024: у главы обязательны шаги 1–7, шаг 8 «Изменение» — по материалу (пустой или «в материале не задано» — норма)
+        n_steps = len(c.steps)
+        expected = "восемь" if c.scope != "глава" else "семь обязательных (1–7) и необязательный восьмой (Р-024)"
+        bad = n_steps != 8 if c.scope != "глава" else not (7 <= n_steps <= 8) or {st.n for st in c.steps} < set(range(1, 8))
+        if bad:
             out.append(LintFinding(code="КРУГ-1", severity="предупреждение", file=_rel_or("", path), line=_find_line(path, c.title[:20]) if path else None,
-                                   message=f"{c.title}: шагов {len(c.steps)}, а в круге истории восемь"))
+                                   message=f"{c.title}: шагов {n_steps}, а в круге истории {expected}"))
         if c.scope in ("книга", "акт"):
             if c.scope == "книга":
                 a, z = lo, hi

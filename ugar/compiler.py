@@ -14,7 +14,7 @@ from jinja2 import Environment, StrictUndefined
 
 from . import circles, exporter, guard, mdparse, realcanon
 from .paths import Workspace
-from .schemas import Brief, Scene, StopRule
+from .schemas import Arc, Act, Brief, Scene, StopRule
 
 SECTION_RE = re.compile(r"<!-- СЕКЦИЯ: (.+?) -->")
 
@@ -338,6 +338,33 @@ def safe_dossier(d, brief: Brief, infobans: list, participants: list[str]):
     })
 
 
+def chapter_act(acts: list[Act], chapter: int) -> Act | None:
+    """Акт главы по таблице актов 2.1 (Р-021); None — актов нет или глава вне их границ."""
+    return next((a for a in acts if a.from_chapter <= chapter <= a.to_chapter), None)
+
+
+def arc_lines(arcs: list[Arc], acts: list[Act], brief: Brief, infobans: list, participants: list[str]) -> list[str]:
+    """Строки «Имя: что видно снаружи» из арок 2.5 (Р-025) для участников сцены и фокала — по акту главы.
+
+    FR-C3: ложь / желание / потребность / «где на арке» в окно НЕ выводятся никогда; «что видно снаружи» —
+    через тот же фильтр, что досье (маркеры тайн, которых фокал не знает, Р-022), и без любых ссылок
+    на тома; пустая ячейка и «⚠ заполнить» — строки нет. Пусто → секции в окне нет."""
+    act = chapter_act(acts, brief.chapter)
+    if act is None or not arcs:
+        return []
+    markers = secret_markers(infobans, brief)
+    out: list[str] = []
+    for name in participants:
+        row = next((a for a in arcs if a.act == act.act and a.character == name), None)
+        if row is None or not row.visible or _TOOL_MARK_RE.search(row.visible):
+            continue
+        text = _safe_sentences(row.visible, markers, brief.volume)
+        if not text or _FUTURE_RE.search(text):
+            continue
+        out.append(f"{name}: {text}")
+    return out
+
+
 def chapter_plants(exports_dir: Path, brief: Brief) -> list:
     """Закладки, назначенные главе (FR-C2): по брифу и/или по реестру (placed = том/глава)."""
     plants = exporter.load_plants(exports_dir)
@@ -454,9 +481,13 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
 
     # каркас драматургии (Р-020): только из канона (2.1 → circles.json), не из черновиков
     try:
-        drama = circles.frame_for_chapter(exporter.load_circles(exports_dir), exporter.load_acts(exports_dir), chapter)
+        acts = exporter.load_acts(exports_dir)
+        drama = circles.frame_for_chapter(exporter.load_circles(exports_dir), acts, chapter)
     except FileNotFoundError:
+        acts = []
         drama = circles.frame_for_chapter([], [], chapter)
+    # арки тома 2.5 (Р-025): Писателю — только «что видно снаружи» участников сцены по акту главы
+    arcs = arc_lines(exporter.load_arcs(exports_dir), acts, brief, infobans, participants)
 
     # «что было раньше» глазами фокала (аудит 2, вывод 1): события, детали, хвост предыдущей главы
     try:
@@ -497,6 +528,7 @@ def compile_window(ws: Workspace, library: Path, chapter: int, soft_limit_chars:
         volume_norm=norms.get("объём_главы"),
         drama=drama,
         drama_lines=circles.frame_lines(drama),
+        arc_lines=arcs,
     )
 
     path = ws.window_path(chapter)

@@ -23,7 +23,7 @@ from pathlib import Path
 from . import mdparse
 from .mdparse import MarkupError, cell
 from .schemas import (
-    Act, Brief, ChronicleEvent, ChronologyEvent, CircleStep, ContinuityEvent, DocumentSpec, Dose, Dossier,
+    Act, Arc, Brief, ChronicleEvent, ChronologyEvent, CircleStep, ContinuityEvent, DocumentSpec, Dose, Dossier,
     InfoBan, MatrixFact,
     Norm, Plant, Scene,
     StopRule, StoryCircle,
@@ -1268,3 +1268,37 @@ def parse_acts(path: Path) -> list[Act]:
                 parts=row.get("Части", "").strip(), steps=row.get("Шаги круга", "").strip(),
             ))
     return sorted(acts, key=lambda a: a.act)
+
+
+# ---------------------------------------------------------------- арки тома (2.5, Р-025)
+
+ARC_COLUMNS = ("Персонаж", "Акт", "Ложь", "Желание", "Потребность", "Где на арке", "Что видно снаружи")
+_ARC_EMPTY = {"", "—", "–", "-"}
+
+
+def _arc_cell(row: dict[str, str], name: str) -> str:
+    value = cell(row, name).strip()
+    return "" if value in _ARC_EMPTY else value
+
+
+def parse_arcs(path: Path) -> list[Arc]:
+    """Документ 2.5 `22_Арки_Том{N}.md` (Р-025): таблица «персонаж × акт»
+    `| Персонаж | Акт | Ложь | Желание | Потребность | Где на арке | Что видно снаружи |`.
+    Пустые ячейки («—») → «»; «⚠ заполнить» остаётся как есть (скелет; в окно такие строки не идут).
+    Строки без имени или без номера акта пропускаются; таблиц может быть несколько (по актам)."""
+    arcs: list[Arc] = []
+    for table in mdparse.parse_tables(path):
+        if not all(any(col in h for h in table.headers) for col in ("Персонаж", "Акт")):
+            continue
+        for row in table.rows:
+            name = _arc_cell(row, "Персонаж").strip("*_ ")
+            m = re.search(r"\d+", cell(row, "Акт"))
+            if not name or not m:
+                continue
+            arcs.append(Arc(
+                character=name, act=int(m.group()),
+                lie=_arc_cell(row, "Ложь"), want=_arc_cell(row, "Желание"), need=_arc_cell(row, "Потребность"),
+                position=_arc_cell(row, "Где на арке"), visible=_arc_cell(row, "Что видно снаружи"),
+            ))
+    return arcs
+
