@@ -1,0 +1,12 @@
+[1mdiff --git a/.gitignore b/.gitignore[m
+[1mindex d9eebf7..5364888 100644[m
+[1m--- a/.gitignore[m
+[1m+++ b/.gitignore[m
+[36m@@ -33,6 +33,7 @@[m [myarn-error.log*[m
+ # env files (can opt-in for committing if needed)[m
+ .env*[m
+ .env.local[m
+[32m+[m[32m.env[m
+ [m
+ # vercel[m
+ .vercel[m
